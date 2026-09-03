@@ -1,15 +1,19 @@
 # ── 데이터 (거대하다: 1분봉이 종목당 90MB, 129종목이면 16GB)
 # 저장소에 넣지 않는다. scripts/fetch_data.py 로 누구나 다시 받을 수 있고,
 # 원본은 data.binance.vision 이므로 재현성이 저장소 크기보다 중요하지 않다.
-data/
-logs/
+#
+# **앞에 / 가 반드시 있어야 한다.** `data/` 로 쓰면 어느 깊이의 data 폴더든
+# 매칭되어 `src/data/` 패키지가 통째로 저장소에서 빠진다. 실제로 그렇게 됐고,
+# 클론한 쪽에서 ModuleNotFoundError: No module named 'src.data' 가 났다.
+/data/
+/logs/
 *.parquet
 
 # ── 실행 결과. runs/ 는 재현 가능하므로 넣지 않되, 최종 리포트는 예외로 둔다
-runs/*
-!runs/final/
-!runs/universe_final.json
-!runs/.gitkeep
+/runs/*
+!/runs/final/
+!/runs/universe_final.json
+!/runs/.gitkeep
 
 # ── 각자의 컴퓨터 설정. 절대경로가 들어가므로 예시만 커밋한다.
 config/local.yaml
