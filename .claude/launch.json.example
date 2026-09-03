@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "cockpit",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "src.server.run", "--prewarm"],
+      "port": 8787
+    }
+  ]
+}

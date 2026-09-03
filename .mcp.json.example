@@ -1,0 +1,18 @@
+{
+  "_설명": [
+    "Claude Code 용 트레이딩뷰 MCP 서버 설정. 조회 전용 — 주문 도구는 없다.",
+    "이 파일을 .mcp.json 으로 복사하고 cwd/PYTHONPATH 를 자기 경로로 바꾸세요.",
+    "절대경로가 필요하므로 저장소에는 예시만 넣습니다."
+  ],
+  "mcpServers": {
+    "tradingview": {
+      "command": "python",
+      "args": ["-m", "src.tradingview.mcp_server"],
+      "cwd": "C:\\경로를\\바꾸세요\\regime-quant",
+      "env": {
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": "C:\\경로를\\바꾸세요\\regime-quant"
+      }
+    }
+  }
+}
