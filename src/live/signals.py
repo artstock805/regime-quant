@@ -36,6 +36,18 @@ from ..indicators import compute_all
 from ..regime import KOREAN, Regime, classify
 from ..strategies import build_all
 
+
+class MissingFeatures(RuntimeError):
+    """전략이 요구하는 특징열이 없다. 대개 파생 데이터를 끈 경우다."""
+
+    def __init__(self, symbol: str, missing: list[str], use_derivatives: bool):
+        self.symbol, self.missing = symbol, missing
+        hint = ("파생 데이터가 필요합니다 — --no-derivatives 를 빼고 다시 실행하세요"
+                if not use_derivatives else
+                "파생 데이터를 받아야 합니다: python scripts/fetch_derivatives.py")
+        super().__init__(f"{symbol}: 특징열 없음 {missing} — {hint}")
+
+
 # 지표 워밍업. Wilder 평활이 기준 구현과 수렴하려면 400봉이 필요하다(실측).
 # 파생 z-score 가 168봉을 쓰므로 넉넉히 잡는다.
 WARMUP_BARS = 900
@@ -151,6 +163,13 @@ def signal_for(
                         train_days=train_days)
     if bars.empty or len(bars) < WARMUP_BARS // 2:
         return None
+
+    # 전략이 요구하는 특징열이 없으면 여기서 이유를 밝힌다.
+    # 기본 전략(taker_flow_momentum)은 파생 데이터에서 오는 perp_taker_ls 를 쓴다.
+    # --no-derivatives 로 끄면 KeyError 만 나고 원인이 보이지 않았다.
+    missing = sorted({c for s in strats for c in s.needs if c not in feats.columns})
+    if missing:
+        raise MissingFeatures(symbol, missing, use_derivatives)
 
     regimes = classify(feats)
     reg_series = regimes["regime"]

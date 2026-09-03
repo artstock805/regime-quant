@@ -43,8 +43,8 @@ def test_live_module_has_no_order_execution():
 
 def test_live_package_exports_only_read_paths():
     exported = set(live.__all__)
-    assert exported == {"SymbolSignal", "StrategyVote", "actionable",
-                        "scan", "signal_for"}
+    assert exported == {"MissingFeatures", "SymbolSignal", "StrategyVote",
+                        "actionable", "scan", "signal_for"}
 
 
 def test_signal_carries_the_no_order_warning():
@@ -143,6 +143,20 @@ def test_signal_for_returns_none_when_bars_are_empty(monkeypatch):
     monkeypatch.setattr(live_signals, "_load",
                         lambda *a, **k: (pd.DataFrame(), pd.DataFrame()))
     assert live_signals.signal_for(_fake_cfg(), "BTCUSDT") is None
+
+
+def test_missing_features_error_says_what_to_do():
+    """
+    기본 전략은 파생 데이터에서 오는 perp_taker_ls 를 쓴다. 파생을 끄면
+    원래는 맨 KeyError 만 났고 원인이 보이지 않았다.
+    """
+    err = live_signals.MissingFeatures("BTCUSDT", ["perp_taker_ls"], False)
+    msg = str(err)
+    assert "perp_taker_ls" in msg
+    assert "--no-derivatives" in msg, "무엇을 고쳐야 하는지 알려 줘야 한다"
+
+    err2 = live_signals.MissingFeatures("BTCUSDT", ["perp_taker_ls"], True)
+    assert "fetch_derivatives" in str(err2)
 
 
 # ─── 직렬화 ───────────────────────────────────────────────────────
