@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Regime Quant</title>
+<title>Regime Quant · 복기</title>
 <style>
   :root{
     --bg:#0d1117; --panel:#151b24; --panel2:#1b222d; --line:#232b38;
@@ -17,7 +17,12 @@
   a:hover{text-decoration:underline}
   .wrap{max-width:1180px;margin:0 auto;padding:22px 20px 60px}
 
-  header{display:flex;align-items:center;gap:14px;margin-bottom:18px}
+  header{display:flex;align-items:center;gap:14px;margin-bottom:18px;flex-wrap:wrap}
+  nav{margin-left:auto;display:flex;gap:6px}
+  nav a{padding:6px 13px;border-radius:8px;border:1px solid var(--line);
+        font-size:12.5px;color:var(--dim)}
+  nav a.on{background:var(--panel2);color:var(--fg);border-color:#3a4757}
+  nav a:hover{text-decoration:none;border-color:#3a4757}
   .logo{width:38px;height:38px;border-radius:9px;background:var(--panel2);
         display:grid;place-items:center;font-size:19px}
   h1{font-size:19px;margin:0;letter-spacing:.2px}
@@ -140,16 +145,21 @@
   <header>
     <div class="logo">📊</div>
     <div>
-      <h1>Regime Quant</h1>
-      <div class="sub">레짐 기반 암호화폐 백테스트 · 신호 조회 도구</div>
+      <h1>Regime Quant · 복기</h1>
+      <div class="sub">백테스트 · 검증 · 지표 성적표 — 왜 그랬는지 돌아보는 곳</div>
     </div>
+    <nav>
+      <a href="/">자동매매</a>
+      <a href="/review" class="on">복기</a>
+      <a href="/cockpit">차트 재생</a>
+    </nav>
   </header>
 
   <!-- 판정을 맨 위에 둔다. 기능을 먼저 보여 주면 경고를 아무도 읽지 않는다. -->
   <div class="verdict">
     <div class="top">
       <span class="badge" id="v-badge">판정 1/5</span>
-      <h2>이 도구로 실매매하지 마십시오 — 주문 기능은 코드에 없습니다</h2>
+      <h2>이 숫자는 과거를 잰 것입니다 — 미래를 보장하지 않습니다</h2>
     </div>
     <div class="vgrid" id="v-grid"></div>
     <div class="why" id="v-why"></div>

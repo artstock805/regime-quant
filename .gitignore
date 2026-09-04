@@ -20,6 +20,16 @@ config/local.yaml
 .mcp.json
 .claude/launch.json
 
+# ── 거래소 API 키. 저장소에 들어가면 되돌릴 수 없다.
+# 커밋 이력에서 지워도 이미 노출된 키는 재발급이 유일한 해결책이다.
+config/secrets.yaml
+config/secrets.*.yaml
+*.key
+*.pem
+
+# ── 실거래 장부. 개인 거래 기록이라 공개 저장소에 올리지 않는다.
+/runs/live/
+
 # ── 파이썬
 __pycache__/
 *.py[cod]

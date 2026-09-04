@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Regime Quant · 자동매매</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#151b24; --panel2:#1b222d; --line:#232b38;
+    --fg:#e6edf3; --dim:#8b98a9; --faint:#5c6875;
+    --up:#3fb950; --down:#f85149; --accent:#58a6ff; --warn:#d29922;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.55 "Malgun Gothic","Segoe UI",system-ui,sans-serif}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  .wrap{max-width:1280px;margin:0 auto;padding:18px 20px 60px}
+
+  header{display:flex;align-items:center;gap:14px;margin-bottom:16px;flex-wrap:wrap}
+  .logo{width:36px;height:36px;border-radius:9px;background:var(--panel2);
+        display:grid;place-items:center;font-size:18px}
+  h1{font-size:18px;margin:0}
+  .sub{color:var(--dim);font-size:12.5px;margin-top:2px}
+  nav{margin-left:auto;display:flex;gap:6px}
+  nav a{padding:6px 13px;border-radius:8px;border:1px solid var(--line);
+        font-size:12.5px;color:var(--dim)}
+  nav a.on{background:var(--panel2);color:var(--fg);border-color:#3a4757}
+  nav a:hover{text-decoration:none;border-color:#3a4757}
+
+  /* ── 엔진 바: 화면에서 가장 중요한 줄 ── */
+  .engine{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+          background:var(--panel);border:1px solid var(--line);
+          border-radius:12px;padding:14px 16px;margin-bottom:14px}
+  .engine.on{border-color:#245c33;background:#111d16}
+  .engine.killed{border-color:#5c2424;background:#1d1213}
+  .dot{width:10px;height:10px;border-radius:50%;background:#4a5563;flex:none}
+  .dot.on{background:var(--up);box-shadow:0 0 0 4px #3fb95022}
+  .dot.killed{background:var(--down);box-shadow:0 0 0 4px #f8514922}
+  .engine .state{font-weight:700;font-size:15px}
+  .engine .mode{background:#1c2532;border:1px solid var(--line);border-radius:999px;
+                padding:2px 10px;font-size:11.5px;color:var(--dim)}
+  .engine .mode.live{background:#3a1010;border-color:#7a2020;color:#ff9a9a}
+  .engine .meta{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums}
+  .engine .sp{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+
+  button{all:unset;cursor:pointer;border-radius:8px;padding:7px 14px;
+         font-size:12.5px;font-weight:600;border:1px solid var(--line);
+         background:var(--panel2);transition:.12s}
+  button:hover{border-color:#3a4757;background:#212a36}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.go{background:#14301e;border-color:#245c33;color:#7ee89b}
+  button.go:hover{background:#1a3d26}
+  button.danger{background:#2c1414;border-color:#5c2424;color:#ff9a9a}
+  button.danger:hover{background:#3a1a1a}
+  button.ghost{background:transparent;color:var(--dim)}
+
+  .cols{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}
+  @media(max-width:1000px){.cols{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+        padding:14px 16px;margin-bottom:14px}
+  .card h3{font-size:12px;margin:0 0 11px;color:var(--dim);letter-spacing:.7px;
+           text-transform:uppercase;font-weight:700;display:flex;
+           align-items:center;gap:8px}
+  .card h3 .tag{background:#1c2532;border:1px solid var(--line);border-radius:999px;
+                padding:1px 8px;font-size:10.5px;letter-spacing:0;text-transform:none}
+
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{padding:6px 8px;text-align:right;border-bottom:1px solid #1c232e;
+        font-variant-numeric:tabular-nums}
+  th{color:var(--dim);font-weight:600;font-size:11px;text-align:right}
+  th:first-child,td:first-child{text-align:left}
+  .long{color:var(--up);font-weight:700} .short{color:var(--down);font-weight:700}
+  .pos{color:var(--up)} .neg{color:var(--down)}
+
+  .kv{display:flex;justify-content:space-between;gap:12px;padding:5px 0;
+      border-bottom:1px dashed #1e2530;font-size:13px}
+  .kv:last-child{border-bottom:0}
+  .kv span:first-child{color:var(--dim)}
+  .kv span:last-child{font-variant-numeric:tabular-nums}
+
+  .empty{color:var(--faint);font-size:12.5px;padding:10px 0}
+  .warnbox{background:#1d1a12;border:1px solid #4a3a12;border-radius:10px;
+           padding:11px 14px;margin-bottom:14px;font-size:12.5px;color:#c9b070}
+  .errbox{background:#1d1213;border:1px solid #5c2424;border-radius:10px;
+          padding:11px 14px;margin-bottom:14px;font-size:12.5px;color:#ff9a9a;
+          white-space:pre-wrap}
+  code{background:#0f141b;border:1px solid var(--line);border-radius:5px;
+       padding:1px 6px;font-size:11.5px}
+
+  .jrow{display:flex;gap:9px;align-items:baseline;padding:5px 0;
+        border-bottom:1px solid #1a212b;font-size:12px}
+  .jrow:last-child{border-bottom:0}
+  .jrow .t{color:var(--faint);font-variant-numeric:tabular-nums;flex:none;width:52px}
+  .jrow .k{flex:none;width:60px;font-weight:700;font-size:11px}
+  .k-order{color:var(--accent)} .k-close{color:var(--warn)}
+  .k-blocked{color:var(--faint)} .k-reject{color:var(--down)}
+  .k-error{color:var(--down)} .k-signal{color:var(--dim)}
+  .k-engine{color:var(--up)} .k-reconcile{color:var(--warn)}
+  .jrow .b{color:var(--dim);word-break:break-all}
+  #journal{max-height:420px;overflow:auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="logo">📊</div>
+    <div>
+      <h1>Regime Quant · 자동매매</h1>
+      <div class="sub">신호 → 진입 → 손절·목표 자동 · 바이낸스 USDT-M 선물</div>
+    </div>
+    <nav>
+      <a href="/" class="on">자동매매</a>
+      <a href="/review">복기</a>
+      <a href="/cockpit">차트 재생</a>
+    </nav>
+  </header>
+
+  <div id="warn"></div>
+
+  <!-- 엔진 상태 — 화면에서 가장 중요한 줄 -->
+  <div class="engine" id="engine">
+    <span class="dot" id="dot"></span>
+    <span class="state" id="state">확인 중…</span>
+    <span class="mode" id="mode">—</span>
+    <span class="meta" id="meta"></span>
+    <span class="sp">
+      <button class="go" id="btnStart">시작</button>
+      <button id="btnStop">중지</button>
+      <button class="danger" id="btnKill">진입 차단</button>
+      <button class="danger" id="btnFlatten">전부 청산</button>
+      <button class="ghost" id="btnOnce">한 바퀴만</button>
+    </span>
+  </div>
+
+  <div class="cols">
+    <div>
+      <div class="card">
+        <h3>포지션 <span class="tag">거래소 실제 상태</span></h3>
+        <div id="positions"><div class="empty">열린 포지션이 없습니다.</div></div>
+      </div>
+
+      <div class="card">
+        <h3>매매 장부 <span class="tag">무엇을 왜 했는지</span></h3>
+        <div id="journal"><div class="empty">아직 기록이 없습니다.</div></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h3>계좌</h3>
+        <div id="account"></div>
+      </div>
+
+      <div class="card">
+        <h3>리스크 가드</h3>
+        <div id="guard"></div>
+      </div>
+
+      <div class="card">
+        <h3>트레이딩뷰 웹훅</h3>
+        <div id="webhook"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const n2 = v => (v === null || v === undefined) ? "—" : Number(v).toFixed(2);
+let timer = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || `${r.status}`);
+  return body;
+}
+
+function renderEngine(s) {
+  const box = $("#engine"), dot = $("#dot");
+  const killed = s.guard?.kill_switch;
+  box.className = "engine" + (killed ? " killed" : s.running ? " on" : "");
+  dot.className = "dot" + (killed ? " killed" : s.running ? " on" : "");
+  $("#state").textContent = killed ? "진입 차단됨"
+    : s.running ? "실행 중" : s.stopping ? "정리 중…" : "정지";
+  const m = $("#mode");
+  m.textContent = s.mode;
+  m.className = "mode" + (s.testnet ? "" : " live");
+
+  const next = s.next_cycle
+    ? Math.max(0, Math.round(s.next_cycle - Date.now()/1000)) : null;
+  $("#meta").textContent =
+    `${s.interval} · ${s.symbols?.length ?? 0}종목 · 조회 ${s.cycles}회`
+    + (next !== null ? ` · 다음 ${Math.floor(next/60)}분 ${next%60}초 후` : "");
+
+  $("#btnStart").disabled = s.running;
+  $("#btnStop").disabled = !s.running;
+  $("#btnKill").disabled = killed;
+  $("#btnKill").textContent = killed ? "차단 해제" : "진입 차단";
+  $("#btnKill").onclick = killed ? release : kill;
+
+  // 경고
+  const w = [];
+  if (!s.credentials?.present)
+    w.push(`<div class="errbox">${s.credentials?.message ?? "API 키가 없습니다"}</div>`);
+  if (s.last_error)
+    w.push(`<div class="errbox">마지막 오류: ${s.last_error}</div>`);
+  if (!s.testnet)
+    w.push(`<div class="errbox"><b>실전 모드입니다.</b> 실제 돈이 오갑니다.
+            검증 판정은 1/5, Deflated Sharpe 0.865(기준 0.95)입니다.</div>`);
+  else
+    w.push(`<div class="warnbox"><b>테스트넷</b>에서 돌고 있습니다 — 가짜 돈입니다.
+            실전으로 바꾸려면 <code>config/config.yaml</code> 의
+            <code>execution.testnet</code> 을 false 로 두고 실전 키를 따로 넣으세요.
+            그 전에 여기서 충분히 돌려 보시길 권합니다.</div>`);
+  $("#warn").innerHTML = w.join("");
+}
+
+function renderPositions(list) {
+  const box = $("#positions");
+  if (!list || !list.length) {
+    box.innerHTML = '<div class="empty">열린 포지션이 없습니다.</div>';
+    return;
+  }
+  box.innerHTML = `<table><thead><tr>
+    <th>종목</th><th>방향</th><th>수량</th><th>진입가</th><th>현재가</th>
+    <th>미실현</th></tr></thead><tbody>` +
+    list.map(p => `<tr>
+      <td>${p.symbol}</td>
+      <td class="${p.side === "LONG" ? "long" : "short"}">${p.side === "LONG" ? "롱" : "숏"}</td>
+      <td>${p.qty}</td><td>${n2(p.entry_price)}</td><td>${n2(p.mark_price)}</td>
+      <td class="${p.unrealised >= 0 ? "pos" : "neg"}">${p.unrealised >= 0 ? "+" : ""}${n2(p.unrealised)}</td>
+    </tr>`).join("") + "</tbody></table>";
+}
+
+function renderAccount(s) {
+  const j = s.journal ?? {};
+  $("#account").innerHTML = [
+    ["지갑 잔고", `${n2(s.balance?.wallet)} USDT`],
+    ["주문 가능", `${n2(s.balance?.available)} USDT`],
+    ["오늘 실현손익", `${(j.realised_today ?? 0) >= 0 ? "+" : ""}${n2(j.realised_today)} USDT`],
+    ["누적 실현손익", `${(j.realised_total ?? 0) >= 0 ? "+" : ""}${n2(j.realised_total)} USDT`],
+    ["청산 완료", `${j.closed ?? 0}건${j.win_rate != null ? ` · 승률 ${(j.win_rate*100).toFixed(0)}%` : ""}`],
+    ["주문 / 차단 / 오류", `${j.orders ?? 0} / ${j.blocked ?? 0} / ${j.errors ?? 0}`],
+  ].map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join("");
+}
+
+function renderGuard(g, s) {
+  if (!g) return;
+  const L = g.limits ?? {};
+  let html = [
+    ["트레이드당 위험", `계좌의 ${(L.risk_per_trade*100).toFixed(1)}%`],
+    ["동시 보유 한도", `${L.max_positions}종목`],
+    ["일일 손실 한도", `${(L.daily_loss_limit*100).toFixed(1)}%` +
+      (g.daily_loss_limit_usdt ? ` (${n2(g.daily_loss_limit_usdt)} USDT)` : "")],
+    ["분당 주문 한도", `${L.max_orders_per_minute}건 · 최근 ${g.orders_last_minute}건`],
+    ["명목가 상한", `계좌의 ${(L.max_notional_ratio*100).toFixed(0)}%`],
+  ].map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join("");
+
+  if (g.recent_blocks?.length) {
+    html += `<div style="margin-top:10px"><div style="color:var(--dim);font-size:11.5px;
+      margin-bottom:5px">최근 차단 — 왜 진입하지 않았는지</div>` +
+      g.recent_blocks.map(b => `<div class="jrow"><span class="t">${
+        (b.at ?? "").slice(11,16)}</span><span class="k k-blocked">${
+        b.symbol ?? ""}</span><span class="b">${b.reason}</span></div>`).join("") + "</div>";
+  }
+  $("#guard").innerHTML = html;
+}
+
+function renderWebhook(s) {
+  const on = s.webhook_configured;
+  $("#webhook").innerHTML = on
+    ? `<div class="kv"><span>상태</span><span style="color:var(--up)">받는 중</span></div>
+       <div class="empty" style="padding-top:8px">
+         트레이딩뷰 알림 메시지에 이 JSON 을 넣으세요.<br>
+         <code>{"secret":"&lt;비밀&gt;","symbol":"BTCUSDT","action":"롱진입"}</code><br>
+         action 은 롱진입 / 숏진입 / 청산.<br><br>
+         <b>가격은 받지 않습니다.</b> 알림이 보낸 가격을 그대로 믿으면 지연이나
+         오타가 그대로 주문이 됩니다. 종목과 방향만 받고 손절·목표는 우리가 계산합니다.
+         그리고 우리 엔진 신호와 <b>같은 리스크 가드</b>를 지납니다.
+       </div>`
+    : `<div class="empty">비활성 — 환경변수
+        <code>REGIME_QUANT_WEBHOOK_SECRET</code> 을 정하고 서버를 다시 켜면
+        트레이딩뷰 Pine 알림을 받습니다.<br><br>
+        비밀이 없으면 누구나 이 서버에 주문을 시킬 수 있으므로 켜지 않습니다.</div>`;
+}
+
+function renderJournal(rows) {
+  const box = $("#journal");
+  if (!rows || !rows.length) {
+    box.innerHTML = '<div class="empty">아직 기록이 없습니다.</div>';
+    return;
+  }
+  const label = {order:"주문", close:"청산", blocked:"차단", reject:"거부",
+                 error:"오류", signal:"신호", engine:"엔진", reconcile:"대조",
+                 position:"포지션"};
+  box.innerHTML = rows.map(r => {
+    const bits = Object.entries(r)
+      .filter(([k]) => !["at","kind"].includes(k))
+      .map(([k,v]) => `${k}=${v}`).join(" · ");
+    return `<div class="jrow"><span class="t">${(r.at ?? "").slice(11,19)}</span>
+      <span class="k k-${r.kind}">${label[r.kind] ?? r.kind}</span>
+      <span class="b">${bits}</span></div>`;
+  }).join("");
+}
+
+async function refresh() {
+  try {
+    const s = await api("/api/live/status");
+    renderEngine(s); renderPositions(s.positions); renderAccount(s);
+    renderGuard(s.guard, s); renderWebhook(s);
+    const j = await api("/api/live/journal?n=80");
+    renderJournal(j.rows);
+    clearTimeout(timer);
+    timer = setTimeout(refresh, s.running ? 3000 : 8000);
+  } catch (e) {
+    $("#warn").innerHTML = `<div class="errbox">화면 갱신 실패: ${e.message}</div>`;
+    clearTimeout(timer);
+    timer = setTimeout(refresh, 8000);
+  }
+}
+
+async function post(path, confirmMsg) {
+  if (confirmMsg && !confirm(confirmMsg)) return;
+  try {
+    const r = await api(path, {method: "POST"});
+    if (r.message) console.log(r.message);
+    if (r.ok === false && r.message) alert(r.message);
+  } catch (e) { alert(e.message); }
+  refresh();
+}
+
+const kill = () => post("/api/live/kill", "새 진입을 즉시 차단합니다. 열린 포지션은 그대로 둡니다.");
+const release = () => post("/api/live/release");
+
+$("#btnStart").onclick = () => post("/api/live/start");
+$("#btnStop").onclick = () => post("/api/live/stop");
+$("#btnFlatten").onclick = () => post("/api/live/flatten",
+  "열린 포지션을 전부 시장가로 정리합니다. 되돌릴 수 없습니다. 진행할까요?");
+$("#btnOnce").onclick = () => post("/api/live/once");
+
+refresh();
+</script>
+</body>
+</html>

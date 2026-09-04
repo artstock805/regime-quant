@@ -64,9 +64,8 @@ def _dir_size(path: Path, limit: int = 4000) -> tuple[int, int]:
     return n, total
 
 
-@router.get("/")
-def home() -> FileResponse:
-    return FileResponse(STATIC / "home.html")
+# "/" 는 자동매매(live_api) 가 잡는다. 여기는 복기 화면의 데이터만 담당한다.
+# 자동매매 앱을 켰는데 첫 화면이 백테스트면 지금 무슨 일이 일어나는지 알 수 없다.
 
 
 @router.get("/api/home/status")

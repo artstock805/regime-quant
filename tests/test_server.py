@@ -309,15 +309,37 @@ def test_api_leaderboard_covers_every_regime(client):
     assert regimes == {str(r) for r in Regime}
 
 
-def test_home_is_served_at_root(client):
+def test_live_trading_is_the_main_screen(client):
     """
-    아이콘을 눌렀을 때 처음 보이는 것은 홈이어야 한다.
-    데이터도 없이 실패하는 상황판이 첫 화면이면 "실행이 안 된다"가 된다.
+    자동매매 앱을 켰는데 첫 화면이 백테스트면 지금 무슨 일이 일어나는지 알 수 없다.
+    본 화면은 엔진 상태·포지션이다.
     """
     r = client.get("/")
     assert r.status_code == 200
-    assert "Regime Quant" in r.text
-    assert "주문 기능은 코드에 없습니다" in r.text, "판정·경고가 첫 화면에 있어야 한다"
+    assert "자동매매" in r.text
+    assert "포지션" in r.text and "리스크 가드" in r.text
+
+
+def test_live_screen_warns_which_venue_it_is_pointed_at(client):
+    """테스트넷인지 실전인지 화면에서 바로 보이지 않으면 사고가 난다."""
+    r = client.get("/")
+    assert "테스트넷" in r.text and "실전" in r.text
+
+
+def test_review_screen_holds_the_backtest_tools(client):
+    """백테스트는 '왜 그랬는지 돌아보는' 도구라 복기 쪽에 둔다."""
+    r = client.get("/review")
+    assert r.status_code == 200
+    assert "복기" in r.text
+    # 작업 목록은 API 로 채워지므로 정적 HTML 이 아니라 목록 자체를 본다
+    names = {t["name"] for t in client.get("/api/home/tasks").json()["tasks"]}
+    assert {"validate", "scoreboard", "signals"} <= names
+
+
+def test_screens_link_to_each_other(client):
+    for path in ("/", "/review"):
+        text = client.get(path).text
+        assert 'href="/"' in text and 'href="/review"' in text, f"{path} 에 내비게이션 없음"
 
 
 def test_cockpit_moved_to_its_own_path(client):
@@ -372,3 +394,81 @@ def test_task_runner_allows_only_one_job_at_a_time():
     ok2, msg = r.start("b", "B", ["-c", "print(1)"])
     assert ok1 and not ok2 and "실행 중" in msg
     r.stop()
+
+
+
+# ─── 자동매매 API ─────────────────────────────────────────────────
+
+def test_live_status_works_without_credentials(client):
+    """
+    키가 없어도 화면은 열려야 한다. 열리지 않으면 "왜 안 되는지"를 볼 곳이 없다.
+    대신 키가 없다는 사실과 어디에 넣는지를 상태에 담는다.
+    """
+    r = client.get("/api/live/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["running"] is False
+    assert body["testnet"] is True, "기본은 테스트넷이어야 한다"
+    assert "credentials" in body
+
+
+def test_live_status_never_leaks_the_key(client, monkeypatch):
+    """
+    상태에 키 **값**이 섞이면 화면·로그·스크린샷으로 새어 나간다.
+    필드 이름이 안내 문구에 나오는 것은 괜찮다 — 값이 나오면 안 된다.
+    """
+    import json
+    monkeypatch.setenv("BINANCE_TESTNET_API_KEY", "KEY-abc123-DO-NOT-LEAK")
+    monkeypatch.setenv("BINANCE_TESTNET_API_SECRET", "SEC-xyz789-DO-NOT-LEAK")
+    blob = json.dumps(client.get("/api/live/status").json(), ensure_ascii=False)
+    assert "abc123" not in blob and "xyz789" not in blob
+    # 키가 있다는 사실만 알린다
+    assert client.get("/api/live/status").json()["credentials"]["present"] is True
+
+
+def test_webhook_is_refused_without_a_configured_secret(client, monkeypatch):
+    """
+    비밀이 없으면 누구나 이 서버에 주문을 시킬 수 있다. 로컬 전용이어도 열지 않는다.
+    """
+    monkeypatch.delenv("REGIME_QUANT_WEBHOOK_SECRET", raising=False)
+    r = client.post("/api/webhook/tradingview",
+                    json={"symbol": "BTCUSDT", "action": "롱진입"})
+    assert r.status_code == 503
+
+
+def test_webhook_rejects_a_wrong_secret(client, monkeypatch):
+    monkeypatch.setenv("REGIME_QUANT_WEBHOOK_SECRET", "right")
+    r = client.post("/api/webhook/tradingview",
+                    json={"secret": "wrong", "symbol": "BTCUSDT",
+                          "action": "롱진입"})
+    assert r.status_code == 401
+
+
+def test_webhook_rejects_an_unknown_action(client, monkeypatch):
+    monkeypatch.setenv("REGIME_QUANT_WEBHOOK_SECRET", "s3cret")
+    r = client.post("/api/webhook/tradingview",
+                    json={"secret": "s3cret", "symbol": "BTCUSDT",
+                          "action": "전량매수"})
+    assert r.status_code == 400
+
+
+def test_webhook_ignores_any_price_the_alert_sends(client, monkeypatch):
+    """
+    알림이 보낸 가격을 그대로 믿으면 지연이나 오타가 그대로 주문이 된다.
+    종목과 방향만 받는다.
+    """
+    from src.server import live_api
+    monkeypatch.setenv("REGIME_QUANT_WEBHOOK_SECRET", "s3cret")
+    seen = {}
+
+    class FakeTrader:
+        def handle_external(self, symbol, action, source="tradingview"):
+            seen.update(symbol=symbol, action=action, source=source)
+            return {"ok": True}
+
+    monkeypatch.setattr(live_api, "trader", lambda: FakeTrader())
+    r = client.post("/api/webhook/tradingview",
+                    json={"secret": "s3cret", "symbol": "btcusdt",
+                          "action": "롱진입", "price": 1.0, "qty": 999})
+    assert r.status_code == 200
+    assert seen == {"symbol": "BTCUSDT", "action": "롱진입", "source": "tradingview"}
