@@ -12,6 +12,10 @@
     POST /api/home/stop          실행 중인 작업 중단
     GET  /api/home/log/{name}    작업 로그 (since 이후 줄만)
     GET  /api/home/signals       마지막 신호 조회 결과 (runs/signals.json)
+    GET  /api/home/watch         자동 감시 상태
+    POST /api/home/watch/start   자동 감시 켜기 (interval 초)
+    POST /api/home/watch/stop    자동 감시 끄기
+    POST /api/home/watch/clear   알림 지우기
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from fastapi.responses import FileResponse
 
 from ..config import load_config
 from .tasks import catalog, runner
+from .watcher import watcher
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 STATIC = Path(__file__).parent / "static"
@@ -101,6 +106,7 @@ def status() -> dict[str, Any]:
         },
         "running": None if not (cur and cur.running) else
                    {"name": cur.name, "label": cur.label},
+        "watch": watcher.status(),
         "reports": {
             "final": (ROOT / "runs" / "final" / "report.html").exists(),
             "signals": (ROOT / "runs" / "signals.json").exists(),
@@ -161,3 +167,32 @@ def last_signals() -> dict[str, Any]:
                        if s.get("action") in {"롱진입", "숏진입", "청산"}],
         "signals": sigs,
     }
+
+
+# ─── 자동 감시 ────────────────────────────────────────────────────
+#
+# 감시는 TaskRunner 슬롯을 쓰지 않는다. 켜 두면 계속 도는 것이라 그 슬롯을
+# 차지하면 다른 버튼이 전부 막힌다. 대신 무거운 작업이 도는 동안에는
+# 그 주기를 건너뛴다 (watcher._cycle 참고).
+
+@router.get("/api/home/watch")
+def watch_status() -> dict[str, Any]:
+    return watcher.status()
+
+
+@router.post("/api/home/watch/start")
+def watch_start(interval: int = 300) -> dict[str, Any]:
+    ok, msg = watcher.start(interval)
+    return {"ok": ok, "message": msg, **watcher.status()}
+
+
+@router.post("/api/home/watch/stop")
+def watch_stop() -> dict[str, Any]:
+    ok, msg = watcher.stop()
+    return {"ok": ok, "message": msg, **watcher.status()}
+
+
+@router.post("/api/home/watch/clear")
+def watch_clear() -> dict[str, Any]:
+    watcher.clear_alerts()
+    return {"ok": True, **watcher.status()}

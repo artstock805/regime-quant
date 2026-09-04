@@ -101,6 +101,37 @@
         margin:2px 4px 2px 0}
   footer{color:var(--faint);font-size:11.5px;margin-top:26px;line-height:1.7;
          border-top:1px solid var(--line);padding-top:14px}
+
+  /* ── 자동 감시 ── */
+  .watchbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+            background:var(--panel2);border:1px solid var(--line);
+            border-radius:10px;padding:10px 13px;margin-bottom:12px}
+  .watchbar.on{border-color:#245c33;background:#132018}
+  .sw{position:relative;width:44px;height:24px;flex:none;cursor:pointer}
+  .sw input{opacity:0;width:0;height:0}
+  .sw .track{position:absolute;inset:0;background:#2a3340;border-radius:999px;
+             transition:background .15s}
+  .sw .knob{position:absolute;top:3px;left:3px;width:18px;height:18px;
+            background:#8b98a9;border-radius:50%;transition:transform .15s,background .15s}
+  .sw input:checked + .track{background:#1f7a37}
+  .sw input:checked + .track .knob{transform:translateX(20px);background:#eafff0}
+  .watchbar select{background:#0f141b;color:var(--fg);border:1px solid var(--line);
+                   border-radius:7px;padding:4px 8px;font:inherit;font-size:12.5px}
+  .watchbar .wlabel{font-weight:700;font-size:13px}
+  .watchbar .wstat{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums}
+  .watchbar .werr{color:var(--down);font-size:12px}
+
+  .alerts{margin-top:10px}
+  .alert{display:flex;align-items:center;gap:10px;padding:7px 10px;margin-bottom:6px;
+         border-radius:8px;background:#12161d;border:1px solid var(--line);font-size:12.5px}
+  .alert.long{border-left:3px solid var(--up)}
+  .alert.short{border-left:3px solid var(--down)}
+  .alert.exit{border-left:3px solid var(--warn)}
+  .alert .sym{font-weight:700;min-width:96px}
+  .alert .act{min-width:52px}
+  .alert .meta{color:var(--dim);margin-left:auto;font-variant-numeric:tabular-nums}
+  button.linkish{all:unset;cursor:pointer;color:var(--accent);font-size:11.5px}
+  button.linkish:hover{text-decoration:underline}
 </style>
 </head>
 <body>
@@ -140,7 +171,23 @@
       </div>
 
       <div class="card">
-        <h3>최근 신호</h3>
+        <h3>실시간 신호</h3>
+
+        <div class="watchbar" id="watchbar">
+          <label class="sw">
+            <input type="checkbox" id="watchToggle">
+            <span class="track"><span class="knob"></span></span>
+          </label>
+          <span class="wlabel">자동 감시</span>
+          <select id="watchInterval"></select>
+          <span class="wstat" id="watchStat">꺼짐</span>
+        </div>
+        <div class="empty" style="padding:0 0 8px;color:var(--faint)">
+          켜 두면 주기마다 다시 조회하고 <b>상태가 바뀐 종목만</b> 알립니다.
+          <b style="color:var(--warn)">주문은 나가지 않습니다.</b>
+        </div>
+
+        <div class="alerts" id="alerts"></div>
         <div id="signals"><div class="empty">아직 조회하지 않았습니다.</div></div>
       </div>
     </div>
@@ -184,6 +231,7 @@
 const $ = s => document.querySelector(s);
 const fmt = (v, d=4) => (v === null || v === undefined) ? "—" : Number(v).toFixed(d);
 let pollTimer = null, logSince = 0, runningName = null, runStart = 0;
+let lastWatchCycles = -1;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -259,6 +307,12 @@ async function startTask(name) {
 async function poll() {
   const st = await api("/api/home/status");
   renderVerdict(st.verdict); renderConfig(st.config); renderData(st.data);
+  if (st.watch) {
+    const before = st.watch.cycles;
+    renderWatch(st.watch);
+    // 감시가 한 바퀴 돌았으면 신호 표도 새로 읽는다
+    if (before !== lastWatchCycles) { lastWatchCycles = before; loadSignals(); }
+  }
   const tl = await api("/api/home/tasks");
   renderTasks(tl.tasks, !!tl.running);
 
@@ -293,7 +347,8 @@ async function poll() {
   }
 
   clearTimeout(pollTimer);
-  pollTimer = setTimeout(poll, active ? 900 : 5000);
+  const watching = st.watch && st.watch.running;
+  pollTimer = setTimeout(poll, active ? 900 : (watching ? 2000 : 5000));
 }
 
 async function loadSignals() {
@@ -319,6 +374,87 @@ async function loadSignals() {
       <td>${r.stop_price ?? "—"}</td></tr>`).join("")}
     </tbody></table></div>`;
 }
+
+/* ───────── 자동 감시 ───────── */
+let watchSeen = 0, intervalsFilled = false;
+
+function fmtAgo(iso){
+  if (!iso) return "—";
+  const s = Math.round((Date.now() - new Date(iso).getTime())/1000);
+  if (s < 60) return `${s}초 전`;
+  if (s < 3600) return `${Math.round(s/60)}분 전`;
+  return `${Math.round(s/3600)}시간 전`;
+}
+
+function renderWatch(w){
+  if (!intervalsFilled && w.choices){
+    $("#watchInterval").innerHTML = w.choices
+      .map(c => `<option value="${c.seconds}">${c.label}마다</option>`).join("");
+    intervalsFilled = true;
+  }
+  $("#watchInterval").value = String(w.interval);
+  $("#watchInterval").disabled = w.running;
+  const box = $("#watchbar");
+  box.classList.toggle("on", w.running);
+  $("#watchToggle").checked = w.running;
+
+  let stat;
+  if (!w.running) {
+    stat = "꺼짐";
+  } else {
+    const next = w.next_run ? Math.max(0, Math.round(w.next_run - Date.now()/1000)) : null;
+    stat = `조회 ${w.cycles}회 · 마지막 ${fmtAgo(w.last_run)}`
+         + (next !== null ? ` · 다음 ${next}초 후` : "")
+         + (w.skipped ? ` · 건너뜀 ${w.skipped}회` : "");
+  }
+  const el = $("#watchStat");
+  el.className = w.last_error ? "werr" : "wstat";
+  el.textContent = w.last_error ? `오류: ${w.last_error}` : stat;
+
+  // 알림
+  const cls = a => a === "롱진입" ? "long" : a === "숏진입" ? "short" : "exit";
+  const box2 = $("#alerts");
+  if (!w.alerts || !w.alerts.length){
+    box2.innerHTML = w.running
+      ? '<div class="empty">아직 상태가 바뀐 종목이 없습니다.</div>' : "";
+  } else {
+    box2.innerHTML =
+      `<div style="display:flex;align-items:center;gap:10px;margin-bottom:7px">
+         <b style="font-size:12.5px">상태 변화 ${w.alerts.length}건</b>
+         <button class="linkish" id="clearAlerts">지우기</button></div>`
+      + w.alerts.map(a => `<div class="alert ${cls(a.action)}">
+          <span class="sym">${a.symbol}</span>
+          <span class="act">${a.action}</span>
+          <span>${a.regime ?? ""}</span>
+          <span class="meta">${a.close ?? ""} · 손절 ${a.stop_price ?? "—"} · ${fmtAgo(a.at)}</span>
+        </div>`).join("");
+    $("#clearAlerts").onclick = async () => {
+      renderWatch(await api("/api/home/watch/clear", {method:"POST"}));
+    };
+    // 새로 생긴 것만 브라우저 알림으로. 주문은 나가지 않는다.
+    if (w.alerts.length > watchSeen && Notification?.permission === "granted"){
+      const a = w.alerts[0];
+      new Notification(`${a.symbol} ${a.action}`, {
+        body: `${a.regime ?? ""} · ${a.close ?? ""} — 주문은 나가지 않습니다`,
+        tag: "regime-quant",
+      });
+    }
+  }
+  watchSeen = w.alerts ? w.alerts.length : 0;
+}
+
+$("#watchToggle").onchange = async (e) => {
+  const on = e.target.checked;
+  if (on && Notification?.permission === "default"){
+    try { await Notification.requestPermission(); } catch {}
+  }
+  const sec = $("#watchInterval").value;
+  const r = on ? await api(`/api/home/watch/start?interval=${sec}`, {method:"POST"})
+               : await api("/api/home/watch/stop", {method:"POST"});
+  if (!r.ok && r.message) alert(r.message);
+  renderWatch(r);
+  loadSignals();
+};
 
 $("#btn-stop").onclick = async () => { await api("/api/home/stop", {method:"POST"}); };
 $("#btn-cockpit").onclick = () => { window.location.href = "/cockpit"; };
