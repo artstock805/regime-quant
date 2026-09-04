@@ -1,8 +1,6 @@
 @echo off
-chcp 65001 >nul
+REM Creates a desktop shortcut. ASCII ONLY - see windows/start.bat.
 cd /d "%~dp0"
-echo 바탕화면 바로가기를 만듭니다...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create-shortcut.ps1"
-if errorlevel 1 ( echo [오류] 바로가기 생성 실패 & pause & exit /b 1 )
-echo 완료되었습니다.
+if errorlevel 1 echo Failed to create the shortcut.
 pause

@@ -27,11 +27,11 @@
 1. **Python 3.11 이상**을 설치합니다 — [python.org](https://www.python.org/downloads/)
    설치 화면의 **"Add Python to PATH"** 를 반드시 체크하세요.
 2. 이 저장소를 받습니다 (`Code → Download ZIP`, 또는 `git clone`).
-3. `windows\install.bat` 을 더블클릭합니다 — 가상환경을 만들고 패키지를 설치하고
-   테스트까지 돌립니다.
-4. `windows\create-shortcut.bat` 을 더블클릭하면 **바탕화면에 아이콘**이 생깁니다.
+3. `windows\create-shortcut.bat` 을 더블클릭하면 **바탕화면에 아이콘**이 생깁니다.
+4. 아이콘을 누릅니다. **처음 누르면 설치부터 물어봅니다** — 가상환경(`.venv`)에만
+   설치하고 시스템 파이썬은 건드리지 않습니다.
 
-이후에는 바탕화면 아이콘을 누르면 메뉴가 열립니다.
+`windows\install.bat` 으로 미리 설치해 둘 수도 있지만, 아이콘만 눌러도 됩니다.
 
 ```
 [1] 실시간 신호 보기          [4] 데이터 받기        [7] 지난 결과 보기
@@ -46,6 +46,18 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python -m src.menu
 ```
+
+### 배치파일은 영문만 담습니다
+
+`windows\*.bat` 에는 한글이 한 글자도 없습니다. cmd.exe 가 배치파일을 **시스템
+ANSI 코드페이지**로 읽기 때문에, UTF-8 로 저장한 한글은 깨지고 **깨진 바이트가
+명령어로 파싱**됩니다 (`'st'은(는) 명령이 아닙니다`). 한국어 Windows 가 아니면
+더 심합니다. 실제로 이것 때문에 바탕화면 아이콘이 아무 일도 안 하는 것처럼
+보였습니다.
+
+그래서 배치파일은 파이썬을 찾아 넘기는 것만 하고, 사람이 읽는 글은 전부
+`src/launcher.py` 가 출력합니다 — 인코딩을 제어할 수 있는 쪽입니다.
+`tests/test_packaging.py` 가 배치파일에 비ASCII 바이트가 들어오면 실패합니다.
 
 ### 왜 .exe 설치파일이 아닌가
 
