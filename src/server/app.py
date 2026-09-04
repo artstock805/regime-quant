@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ..config import load_config
 from ..regime import KOREAN, Regime
+from .home import router as home_router
 from .session import Session, build_session, first_traded_bar
 
 STATIC = Path(__file__).parent / "static"
@@ -40,19 +41,32 @@ app.state.opts = {"symbol": "BTCUSDT", "interval": "1h", "start": None, "end": N
 
 
 def get_session() -> Session:
+    """
+    세션은 **처음 필요할 때** 만든다. 서버가 뜰 때 만들면 데이터가 없거나 전략이
+    요구하는 열이 없을 때 서버 자체가 죽고, 홈 화면조차 열리지 않는다.
+    실패는 502 로 돌려 화면이 이유를 보여 주게 한다.
+    """
     if app.state.session is None:
         cfg = load_config()
         o = app.state.opts
-        app.state.session = build_session(
-            cfg, o["symbol"], o["interval"], o["start"], o["end"], o["entry_threshold"]
-        )
+        try:
+            app.state.session = build_session(
+                cfg, o["symbol"], o["interval"], o["start"], o["end"],
+                o["entry_threshold"])
+        except Exception as exc:
+            raise HTTPException(502, str(exc)) from exc
     return app.state.session
 
 
 # ─── 화면 ────────────────────────────────────────────────────────
+# "/" 는 홈(온보딩)이고 상황판은 "/cockpit" 이다. 아이콘을 눌렀을 때 처음 보이는
+# 것이 데이터도 없이 실패하는 상황판이면 안 된다.
 
-@app.get("/")
-def index() -> FileResponse:
+app.include_router(home_router)
+
+
+@app.get("/cockpit")
+def cockpit() -> FileResponse:
     return FileResponse(STATIC / "index.html")
 
 

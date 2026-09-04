@@ -9,11 +9,13 @@ ANSI 코드페이지로 읽어 깨뜨리고, 깨진 바이트를 명령어로 �
 
 하는 일
     1) 콘솔을 UTF-8 로 맞춘다
-    2) 필요한 패키지가 있는지 본다 — 없으면 설치를 제안한다
+    2) 필요한 패키지가 있는지 본다 — 없으면 그 자리에서 설치를 제안한다
     3) 가상환경(.venv)이 있으면 그쪽 파이썬으로 다시 띄운다
-    4) 메뉴를 연다
+    4) **웹 서버를 켜고 브라우저를 연다**
 
-처음 아이콘을 눌렀을 때 "설치부터 하세요"라고 돌려보내지 않는 것이 목적이다.
+처음 아이콘을 눌렀을 때 "설치부터 하세요"라고 돌려보내지 않는 것,
+그리고 터미널 메뉴가 아니라 **화면**이 뜨는 것이 목적이다.
+터미널 메뉴가 필요하면 `--menu` 를 준다.
 """
 
 from __future__ import annotations
@@ -96,6 +98,9 @@ def main(argv: list[str] | None = None) -> int:
     setup_console()
     args = sys.argv[1:] if argv is None else argv
     install_only = "--install" in args
+    text_menu = "--menu" in args
+    # --serve-only: 브라우저를 열지 않는다 (외부 도구가 띄울 때)
+    no_browser = "--serve-only" in args
 
     if sys.version_info < MIN_PYTHON:
         print(f"\n  Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} 이상이 필요합니다 "
@@ -120,7 +125,8 @@ def main(argv: list[str] | None = None) -> int:
     if VENV_PY.exists() and here != VENV_PY.resolve():
         if not missing_packages(str(VENV_PY)):
             os.environ.setdefault("PYTHONUTF8", "1")
-            return subprocess.run([str(VENV_PY), "-m", "src.menu"], cwd=ROOT).returncode
+            return subprocess.run([str(VENV_PY), "-m", "src.launcher", *args],
+                                  cwd=ROOT).returncode
 
     # ── 패키지 확인
     gone = missing_packages()
@@ -139,12 +145,54 @@ def main(argv: list[str] | None = None) -> int:
             ask("\n  엔터를 누르면 닫힙니다 ")
             return 1
         os.environ.setdefault("PYTHONUTF8", "1")
-        return subprocess.run([str(VENV_PY), "-m", "src.menu"], cwd=ROOT).returncode
+        return subprocess.run([str(VENV_PY), "-m", "src.launcher", *args],
+                              cwd=ROOT).returncode
 
-    # ── 이미 갖춰져 있으면 바로 메뉴
+    # ── 준비 완료
     sys.path.insert(0, str(ROOT))
-    from src.menu import main as menu_main
-    return menu_main()
+    if text_menu:
+        from src.menu import main as menu_main
+        return menu_main()
+    return serve(open_browser=not no_browser)
+
+
+def serve(host: str = "127.0.0.1", port: int = 8787,
+          open_browser: bool = True) -> int:
+    """웹 화면을 켜고 브라우저를 연다."""
+    import socket
+    import threading
+    import webbrowser
+
+    # 포트가 이미 쓰이면 다음 포트를 찾는다. "이미 켜져 있는데 안 열린다"가
+    # 가장 흔한 혼란이라, 조용히 실패하지 않고 옮겨서 연다.
+    for p in range(port, port + 12):
+        with socket.socket() as s:
+            if s.connect_ex((host, p)) != 0:
+                port = p
+                break
+    else:
+        print(f"\n  {host}:{port}~ 포트가 모두 사용 중입니다.")
+        return 1
+
+    url = f"http://{host}:{port}"
+    print("\n" + "=" * 70)
+    print("  Regime Quant")
+    print("=" * 70)
+    print(f"\n  화면 주소  {url}")
+    print("  이 창을 닫으면 서버도 함께 종료됩니다. (Ctrl+C 로도 종료)")
+    print("\n  판정 1/5 · Deflated Sharpe 0.865 (기준 0.95)")
+    print("  주문 실행 기능은 없습니다. 백테스트와 신호 조회 전용입니다.\n")
+
+    if open_browser:
+        threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+
+    import uvicorn
+    from src.server.app import app
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="warning")
+    except KeyboardInterrupt:
+        pass
+    return 0
 
 
 if __name__ == "__main__":

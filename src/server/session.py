@@ -26,6 +26,7 @@ from ..backtest.walkforward import WalkForwardResult, Window
 from ..config import Config, Costs
 from ..data.binance import interval_timedelta
 from ..data.cache import get_klines
+from ..data.derivatives import ALL_FIELDS, align_to_bars, get_derivatives
 from ..indicators import compute_all
 from ..regime import KOREAN, Regime, classify
 from ..strategies import build_all
@@ -93,7 +94,7 @@ class Session:
             },
             # 실전 모드는 잠겨 있다. 합격 기준을 통과하지 못했다.
             "live_unlocked": False,
-            "live_locked_reason": "합격 기준 미달 (5.9년 OOS 0/4) — 실전 모드는 잠겨 있습니다",
+            "live_locked_reason": "판정 1/5 · Deflated Sharpe 0.865 (기준 0.95) — 주문 실행 기능은 코드에 없습니다",
         }
 
     def candles(self, lo: int, hi: int) -> list[dict]:
@@ -296,10 +297,35 @@ def build_session(
                       market=cfg.require("market"), klines_dir=kd)
     if bars.empty:
         raise ValueError(f"{symbol} {interval} 데이터가 없습니다 ({start} → {end})")
+
+    # 파생 데이터를 붙인다. 기본 전략(taker_flow_momentum)이 perp_taker_ls 를
+    # 요구하므로 이게 없으면 walk-forward 가 KeyError 로 죽는다.
+    # 검증 스위트와 같은 규칙을 쓴다 — 화면과 검증 숫자가 같은 것을 가리켜야 한다.
+    deriv = get_derivatives(symbol, start, end, market=cfg.require("market"),
+                            deriv_dir=cfg.path("paths.derivatives_dir"))
+    if not deriv.empty:
+        bars = align_to_bars(bars, deriv, interval)
+        fields = [c for c in ALL_FIELDS if c in bars.columns]
+        if fields:
+            have = bars[fields].notna().all(axis=1)
+            if have.any():
+                bars = bars[have]
+
     minute = get_klines(symbol, "1m", start, end,
                         market=cfg.require("market"), klines_dir=kd)
 
     feats = compute_all(bars)
+
+    # 전략이 요구하는 열이 없으면 여기서 이유를 밝힌다. walk-forward 안쪽에서
+    # 터지면 스택만 보이고 무엇을 해야 하는지 알 수 없다.
+    wanted = set(cfg.get("strategies") or [])
+    need = {c for s in build_all() if not wanted or s.name in wanted for c in s.needs}
+    missing = sorted(need - set(feats.columns))
+    if missing:
+        raise ValueError(
+            f"{symbol}: 전략이 요구하는 특징열이 없습니다 {missing}. "
+            "파생 데이터를 먼저 받으세요 — 홈 화면의 '데이터 받기' 또는 "
+            "python scripts/fetch_derivatives.py")
     regimes = classify(feats)
 
     names = cfg.get("strategies")
@@ -311,7 +337,13 @@ def build_session(
         reward_ratio=float(cfg.require("risk.reward_ratio")),
         daily_loss_limit=float(cfg.require("risk.daily_loss_limit")),
     )
-    wp = WeightParams() if entry_threshold is None else WeightParams(entry_threshold=entry_threshold)
+    # 설정의 검증값을 그대로 쓴다. 화면과 검증 리포트가 다른 숫자를 가리키면
+    # 상황판이 검증을 보증하지 못한다. --entry-threshold 로만 덮어쓴다.
+    wp = WeightParams(
+        entry_threshold=float(entry_threshold if entry_threshold is not None
+                              else cfg.get("risk.entry_threshold", 0.35)),
+        calibrate_strength=bool(cfg.get("live.calibrate_strength", False)),
+    )
 
     result = walk_forward(
         bars, feats, regimes["regime"], strategies, cfg, interval=interval,

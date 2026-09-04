@@ -309,6 +309,66 @@ def test_api_leaderboard_covers_every_regime(client):
     assert regimes == {str(r) for r in Regime}
 
 
-def test_index_is_served(client):
+def test_home_is_served_at_root(client):
+    """
+    아이콘을 눌렀을 때 처음 보이는 것은 홈이어야 한다.
+    데이터도 없이 실패하는 상황판이 첫 화면이면 "실행이 안 된다"가 된다.
+    """
     r = client.get("/")
+    assert r.status_code == 200
+    assert "Regime Quant" in r.text
+    assert "주문 기능은 코드에 없습니다" in r.text, "판정·경고가 첫 화면에 있어야 한다"
+
+
+def test_cockpit_moved_to_its_own_path(client):
+    r = client.get("/cockpit")
     assert r.status_code == 200 and "레짐 퀀트 상황판" in r.text
+
+
+def test_home_status_works_without_a_session(client):
+    """
+    홈은 walk-forward 를 돌리지 않는다. 세션 구성이 필요하면 데이터가 없을 때
+    홈조차 열리지 않는다.
+    """
+    r = client.get("/api/home/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["verdict"]["passed"] == 1 and body["verdict"]["total"] == 5
+    assert body["verdict"]["order_execution"] is False
+    assert "klines_dir" in body["data"]
+
+
+def test_home_only_runs_whitelisted_tasks(client):
+    """
+    웹에서 임의 인자를 받아 실행하면 원격 코드 실행이 된다. 목록에 있는 것만 돈다.
+    """
+    r = client.post("/api/home/run/rm-rf")
+    assert r.status_code == 404
+
+
+def test_task_catalog_has_no_order_execution(client):
+    r = client.get("/api/home/tasks")
+    assert r.status_code == 200
+    blob = " ".join(t["argv"][0] if isinstance(t.get("argv"), list) else ""
+                    for t in r.json()["tasks"]).lower()
+    assert "order" not in blob and "trade.py" not in blob
+
+
+def test_task_log_strips_terminal_colour_codes():
+    """
+    pytest 는 파이프로 보내도 색상 코드를 넣는 경우가 있다. 그대로 브라우저에
+    넘기면 깨진 글자로 보인다 — 실제로 홈 화면에서 그랬다.
+    """
+    from src.server.tasks import ANSI
+    raw = "\x1b[32m.\x1b[0m\x1b[32m.\x1b[0m [ 12%]"
+    assert ANSI.sub("", raw) == ".. [ 12%]"
+
+
+def test_task_runner_allows_only_one_job_at_a_time():
+    """두 개가 겹치면 둘 다 느려지고 사용자는 무엇이 멈춘 건지 알 수 없다."""
+    from src.server.tasks import TaskRunner
+    r = TaskRunner()
+    ok1, _ = r.start("a", "A", ["-c", "import time; time.sleep(5)"])
+    ok2, msg = r.start("b", "B", ["-c", "print(1)"])
+    assert ok1 and not ok2 and "실행 중" in msg
+    r.stop()
