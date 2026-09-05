@@ -234,6 +234,9 @@ def positions() -> dict[str, dict]:
             "current_price": p.price_current,
             "stop_loss": p.sl or None, "take_profit": p.tp or None,
             "profit": p.profit, "swap": p.swap,
+            # magic 으로 우리가 연 포지션을 구분한다. 사람이 손으로 연 것을
+            # 우리 것으로 착각해 청산하면 그건 사고다.
+            "magic": getattr(p, "magic", 0),
             "opened_at": datetime.fromtimestamp(p.time, timezone.utc).isoformat(),
             "comment": p.comment,
         }
