@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from ..config import load_config
 from ..fx import (
@@ -338,12 +338,10 @@ def _r_multiple(t: dict, order: dict | None) -> float | None:
     return round(moved / risk, 2)
 
 
-@router.get("/api/fx/history")
-def fx_history(days: int = 30, limit: int = 60,
-               only_ours: bool = False) -> dict[str, Any]:
+def _enriched(days: int) -> tuple[list[dict], dict]:
     """
-    닫힌 거래 목록. 우리가 연 것과 사람이 손으로 연 것을 **구분해서** 준다.
-    섞어서 한 덩어리로 보여 주면 엔진 성적을 잘못 읽는다.
+    청산된 거래 + 우리 장부에서 온 부가정보. 화면·CSV 가 같은 것을 봐야
+    한다 — 따로 만들면 내보낸 파일과 화면 숫자가 언젠가 어긋난다.
     """
     try:
         raw = fx_deals(days=max(days, 1))
@@ -366,7 +364,17 @@ def fx_history(days: int = 30, limit: int = 60,
         t["display"] = pair.display if pair else t["symbol"]
         t["tradingview"] = pair.tradingview if pair else None
         t["is_fx"] = pair is not None
+    return trades, flows
 
+
+@router.get("/api/fx/history")
+def fx_history(days: int = 30, limit: int = 60,
+               only_ours: bool = False) -> dict[str, Any]:
+    """
+    닫힌 거래 목록. 우리가 연 것과 사람이 손으로 연 것을 **구분해서** 준다.
+    섞어서 한 덩어리로 보여 주면 엔진 성적을 잘못 읽는다.
+    """
+    trades, flows = _enriched(days)
     shown = [t for t in trades if t["ours"]] if only_ours else trades
     return {
         "days": days,
@@ -411,6 +419,11 @@ def _history_summary(trades: list[dict]) -> dict[str, Any]:
         "ours": block(ours),
         "manual": block([t for t in trades if not t["ours"]]),
         "all": block(trades),
+        # R 곡선은 **엔진 거래만** 그린다. 사람이 손으로 낸 거래는 손절가
+        # 기록이 없어 1R 이 정의되지 않는다. 섞으면 곡선이 거짓말을 한다.
+        "r_curve": _r_curve(ours),
+        "r_missing": len(ours) - sum(
+            1 for t in ours if t.get("r_multiple") is not None),
         "realised_today": round(
             sum(t["profit"] for t in trades if t["closed_at"][:10] == today), 2),
         "ours_today": round(
@@ -467,3 +480,78 @@ def fx_balance(days: int = 90) -> dict[str, Any]:
         "curve": curve[-200:],
         "days": days,
     }
+
+
+def _r_curve(trades: list[dict]) -> list[dict]:
+    """
+    누적 R 곡선.
+
+    **금액 곡선보다 이쪽이 전략 평가에 맞다.** 금액은 랏 크기에 따라 달라져서,
+    같은 판단을 크게 걸었는지 작게 걸었는지가 곡선 모양을 바꾼다. R 은 "건 돈
+    대비 몇 배"라 랏과 무관하게 판단의 질만 남는다.
+
+    손절가를 아는 거래만 들어간다 — 그래야 1R 이 정의된다. 사람이 손으로 낸
+    거래에는 우리 장부가 없어 대부분 빠진다. 그건 정상이고, 몇 건이 빠졌는지
+    화면에 같이 내보낸다.
+    """
+    known = [t for t in trades if t.get("r_multiple") is not None]
+    known.sort(key=lambda t: t["closed_at"])
+    curve, run = [], 0.0
+    for t in known:
+        run += t["r_multiple"]
+        curve.append({
+            "at": t["closed_at"], "cum_r": round(run, 3),
+            # display 는 _enriched 가 채우지만, 요약만 따로 부르는 경로도
+            # 있으므로 없으면 브로커 심볼로 물러선다. 곡선 하나 때문에
+            # 요약 전체가 터지면 안 된다.
+            "r": t["r_multiple"],
+            "symbol": t.get("display") or t.get("symbol") or "",
+        })
+    return curve
+
+
+CSV_COLUMNS = [
+    ("closed_at", "청산시각"), ("opened_at", "진입시각"),
+    ("display", "종목"), ("symbol", "브로커심볼"), ("side", "방향"),
+    ("volume", "수량"), ("entry_price", "진입가"), ("exit_price", "청산가"),
+    ("stop_loss", "손절가"), ("profit", "순손익"), ("gross", "총손익"),
+    ("commission", "수수료"), ("swap", "스왑"), ("r_multiple", "R배수"),
+    ("held_minutes", "보유분"), ("regime", "국면"), ("score", "점수"),
+    ("source", "출처"), ("position_id", "포지션ID"),
+]
+
+
+@router.get("/api/fx/history.csv")
+def fx_history_csv(days: int = 30, only_ours: bool = False) -> Response:
+    """
+    내역을 CSV 로 내보낸다. 성적을 따로 뜯어보고 싶을 때 쓴다.
+
+    **BOM 을 붙인다.** 엑셀은 BOM 없는 UTF-8 을 ANSI(949)로 읽어서 한글이
+    전부 깨진다. 내보낸 파일을 열었더니 글자가 깨져 있으면 그 기능은 없는
+    것과 같다.
+    """
+    trades, _ = _enriched(days)
+    if only_ours:
+        trades = [t for t in trades if t["ours"]]
+
+    lines = [",".join(ko for _, ko in CSV_COLUMNS)]
+    for t in trades:
+        row = {**t, "source": "엔진" if t["ours"] else "수동"}
+        cells = []
+        for key, _ in CSV_COLUMNS:
+            v = row.get(key)
+            v = "" if v is None else str(v)
+            # 쉼표·따옴표·줄바꿈이 든 값은 감싸야 칸이 밀리지 않는다.
+            if any(c in v for c in ',"\n'):
+                v = '"' + v.replace('"', '""') + '"'
+            cells.append(v)
+        lines.append(",".join(cells))
+
+    body = "﻿" + "\r\n".join(lines) + "\r\n"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    name = f"fx-trades-{'engine-' if only_ours else ''}{stamp}.csv"
+    return Response(
+        content=body.encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )

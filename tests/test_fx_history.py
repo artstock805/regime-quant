@@ -274,3 +274,134 @@ def test_empty_history_does_not_crash():
     assert s["all"]["trades"] == 0
     assert s["all"]["win_rate"] is None
     assert s["realised_today"] == 0
+
+
+# ─── 누적 R 곡선 ─────────────────────────────────────────────────
+
+def test_r_curve_accumulates_in_time_order():
+    """
+    **금액 곡선보다 R 곡선이 전략 평가에 맞다.** 금액은 랏 크기에 따라 달라져서
+    같은 판단을 크게 걸었는지 작게 걸었는지가 곡선 모양을 바꾼다. R 은 랏과
+    무관하게 판단의 질만 남는다.
+    """
+    trades = [
+        {"r_multiple": 2.0, "closed_at": "2026-09-03T00:00:00+00:00",
+         "display": "EUR/USD"},
+        {"r_multiple": -1.0, "closed_at": "2026-09-01T00:00:00+00:00",
+         "display": "GBP/USD"},
+        {"r_multiple": 0.5, "closed_at": "2026-09-02T00:00:00+00:00",
+         "display": "USD/JPY"},
+    ]
+    curve = fx_api._r_curve(trades)
+    assert [p["cum_r"] for p in curve] == [-1.0, -0.5, 1.5]
+    assert [p["symbol"] for p in curve] == ["GBP/USD", "USD/JPY", "EUR/USD"]
+
+
+def test_r_curve_skips_trades_without_a_known_stop():
+    """
+    손절가를 모르면 1R 이 정의되지 않는다. 0 으로 넣으면 곡선이 평평해져서
+    "본전이었다"로 읽힌다 — 실제로는 모르는 것이다.
+    """
+    trades = [
+        {"r_multiple": 1.5, "closed_at": "2026-09-01T00:00:00+00:00",
+         "display": "EUR/USD"},
+        {"r_multiple": None, "closed_at": "2026-09-02T00:00:00+00:00",
+         "display": "GOLD"},
+    ]
+    curve = fx_api._r_curve(trades)
+    assert len(curve) == 1
+    assert curve[0]["cum_r"] == pytest.approx(1.5)
+
+
+def test_r_curve_is_engine_only_and_reports_what_it_dropped():
+    """
+    사람이 손으로 낸 거래는 우리 장부가 없어 손절가를 모른다. 그것을 섞으면
+    곡선이 거짓말을 한다. 대신 몇 건이 빠졌는지 같이 내보낸다.
+    """
+    trades = [
+        {"ours": True, "profit": 10.0, "commission": 0.0, "swap": 0.0,
+         "r_multiple": 2.0, "closed_at": "2026-09-01T00:00:00+00:00",
+         "display": "EUR/USD"},
+        {"ours": True, "profit": 5.0, "commission": 0.0, "swap": 0.0,
+         "r_multiple": None, "closed_at": "2026-09-02T00:00:00+00:00",
+         "display": "EUR/USD"},
+        {"ours": False, "profit": -99.0, "commission": 0.0, "swap": 0.0,
+         "r_multiple": 9.9, "closed_at": "2026-09-03T00:00:00+00:00",
+         "display": "GOLD"},
+    ]
+    s = fx_api._history_summary(trades)
+    assert [p["cum_r"] for p in s["r_curve"]] == [2.0]     # 수동 9.9 는 안 들어간다
+    assert s["r_missing"] == 1
+
+
+def test_empty_r_curve_is_empty_not_zero():
+    """
+    거래가 없을 때 0 짜리 점을 하나 넣으면 화면이 "본전"을 그린다.
+    없으면 없다고 해야 한다.
+    """
+    assert fx_api._r_curve([]) == []
+    assert fx_api._history_summary([])["r_curve"] == []
+
+
+# ─── CSV 내보내기 ────────────────────────────────────────────────
+
+def _csv_of(monkeypatch, trades, **kw):
+    monkeypatch.setattr(fx_api, "_enriched", lambda days: (trades, {}))
+    return fx_api.fx_history_csv(**kw)
+
+
+def test_csv_starts_with_a_bom(monkeypatch):
+    """
+    **엑셀은 BOM 없는 UTF-8 을 ANSI(949)로 읽어 한글을 전부 깨뜨린다.**
+    내보낸 파일을 열었더니 글자가 깨져 있으면 그 기능은 없는 것과 같다.
+    """
+    res = _csv_of(monkeypatch, [])
+    assert res.body.startswith(b"\xef\xbb\xbf")
+    assert "charset=utf-8" in res.media_type
+
+
+def test_csv_header_is_korean_and_readable(monkeypatch):
+    res = _csv_of(monkeypatch, [])
+    head = res.body.decode("utf-8-sig").splitlines()[0]
+    assert head.startswith("청산시각,진입시각,종목")
+    assert "R배수" in head and "출처" in head
+
+
+def test_csv_marks_engine_and_manual(monkeypatch):
+    trades = [
+        {"ours": True, "display": "EUR/USD", "profit": 1.0, "position_id": 1},
+        {"ours": False, "display": "GOLD", "profit": -2.0, "position_id": 2},
+    ]
+    body = _csv_of(monkeypatch, trades).body.decode("utf-8-sig")
+    assert "엔진" in body and "수동" in body
+
+
+def test_csv_quotes_values_that_would_break_columns(monkeypatch):
+    """쉼표가 든 값을 그냥 쓰면 칸이 밀려서 파일 전체가 어긋난다."""
+    trades = [{"ours": True, "display": "EUR/USD", "regime": "횡보, 고변동",
+               "position_id": 1}]
+    line = _csv_of(monkeypatch, trades).body.decode("utf-8-sig").splitlines()[1]
+    assert '"횡보, 고변동"' in line
+
+    import csv, io
+    rows = list(csv.DictReader(io.StringIO(
+        _csv_of(monkeypatch, trades).body.decode("utf-8-sig"))))
+    assert rows[0]["국면"] == "횡보, 고변동"       # 되읽어도 한 칸이다
+
+
+def test_csv_filename_says_whether_it_is_engine_only(monkeypatch):
+    """파일이 여러 개 쌓였을 때 이름만 보고 무엇인지 알아야 한다."""
+    plain = _csv_of(monkeypatch, [], only_ours=False)
+    mine = _csv_of(monkeypatch, [], only_ours=True)
+    assert "engine" not in plain.headers["content-disposition"]
+    assert "engine" in mine.headers["content-disposition"]
+    assert "attachment" in plain.headers["content-disposition"]
+
+
+def test_csv_only_ours_filters_rows(monkeypatch):
+    trades = [
+        {"ours": True, "display": "EUR/USD", "position_id": 1},
+        {"ours": False, "display": "GOLD", "position_id": 2},
+    ]
+    body = _csv_of(monkeypatch, trades, only_ours=True).body.decode("utf-8-sig")
+    assert "EUR/USD" in body and "GOLD" not in body
