@@ -72,7 +72,8 @@ app.include_router(home_router)
 @app.get("/")
 def index() -> FileResponse:
     """본 화면은 FX 상황판 — 트레이딩뷰 차트가 중심이다."""
-    return FileResponse(STATIC / "fx.html")
+    from .fx_api import NO_CACHE
+    return FileResponse(STATIC / "fx.html", headers=NO_CACHE)
 
 
 @app.get("/cockpit")

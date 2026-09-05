@@ -82,6 +82,22 @@
   .errbox{background:#1d1213;border:1px solid #5c2424;border-radius:9px;
           padding:10px 12px;font-size:12px;color:#ff9a9a;white-space:pre-wrap;
           margin-bottom:11px}
+  .btn{background:#1c222b;border:1px solid var(--line);color:var(--fg);
+    border-radius:7px;padding:6px 11px;font-size:12px;cursor:pointer;
+    font-family:inherit}
+  .btn:hover{background:#243040}
+  .btn.go{background:#16351f;border-color:#2c6b3d}
+  .btn.go:hover{background:#1d4527}
+  .btn.stop{background:#331a1a;border-color:#6b2c2c}
+  .btn.stop:hover{background:#452020}
+  .btn:disabled{opacity:.4;cursor:default}
+  .btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+  .verdict{background:#1d1a12;border:1px solid #4a3a12;border-radius:9px;
+    padding:10px 12px;font-size:12px;line-height:1.6;margin-bottom:10px}
+  .verdict b{color:#e0b341}
+  .enginerow{display:flex;justify-content:space-between;align-items:center;
+    font-size:12px;padding:3px 0}
+  .enginerow .k{color:var(--faint)}
   .warnbox{background:#1d1a12;border:1px solid #4a3a12;border-radius:9px;
            padding:10px 12px;font-size:11.5px;color:#c9b070;margin-bottom:11px}
   .poscard{border-left:3px solid var(--line);padding-left:9px;margin-bottom:9px;
@@ -118,6 +134,11 @@
     <div id="alerts"></div>
 
     <div class="card">
+      <h3>자동매매</h3>
+      <div id="engine"><div class="empty">확인 중…</div></div>
+    </div>
+
+    <div class="card">
       <h3>계좌</h3>
       <div id="account"><div class="empty">확인 중…</div></div>
     </div>
@@ -138,6 +159,12 @@
 <script src="https://s3.tradingview.com/tv.js"></script>
 <script>
 const $ = s => document.querySelector(s);
+
+// 서버에서 온 문자열을 그대로 innerHTML 에 넣지 않는다. 브로커 이름·오류
+// 문구가 어디서 왔는지 우리가 다 통제하지 못한다.
+const esc = v => String(v ?? "").replace(/[&<>"']/g,
+  c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;",
+         '"': "&quot;", "'": "&#39;"}[c]));
 let widget = null, shown = null, quotes = [], provider = "FX_IDC";
 let holding = new Set(), timer = null;
 
@@ -290,6 +317,60 @@ function renderStatus(s) {
   }
 }
 
+/* ───────── 자동매매 엔진 ─────────
+   이 신호는 FX 에서 우위가 확인되지 않았다. 화면이 그 판정을 지우면
+   사용자는 검증된 것을 돌리고 있다고 착각한다. 버튼 위에 붙여 둔다. */
+let engineBusy = false;
+
+async function engineCall(path) {
+  if (engineBusy) return;
+  engineBusy = true;
+  try { renderEngine(await api(path, {method: "POST"})); }
+  catch (e) { $("#alerts").innerHTML =
+    `<div class="errbox">${e.message}</div>`; }
+  finally { engineBusy = false; }
+}
+
+function renderEngine(st) {
+  if (!st) return;
+  const box = $("#engine");
+  const v = st.verdict || {};
+  const killed = st.guard?.kill_switch;
+  const on = st.running;
+
+  const state = killed ? ["킬 스위치", "#f0616d"]
+              : on ? ["작동 중", "#3fb950"]
+              : ["정지", "var(--faint)"];
+
+  const g = st.guard || {};
+  box.innerHTML = `
+    ${v.passed === false ? `<div class="verdict">
+        <b>검증 미통과 — ${esc(v.headline || "")}</b><br>${esc(v.detail || "")}
+      </div>` : ""}
+    <div class="enginerow"><span class="k">상태</span>
+      <b style="color:${state[1]}">${state[0]}</b></div>
+    <div class="enginerow"><span class="k">주문 대상</span>
+      <b>${st.allow_live ? "실계좌 허용됨" : "데모 전용"}</b></div>
+    <div class="enginerow"><span class="k">봉</span><b>${esc(st.interval || "")}</b></div>
+    <div class="enginerow"><span class="k">감시 종목</span><b>${st.scanned ?? 0}</b></div>
+    <div class="enginerow"><span class="k">오늘 실현</span>
+      <b>${(g.realised_today ?? 0).toFixed(2)}</b></div>
+    ${st.last_error ? `<div class="errbox">${esc(st.last_error)}</div>` : ""}
+    <div class="btns">
+      ${on ? `<button class="btn stop" onclick="engineCall('/api/fx/engine/stop')">정지</button>`
+           : `<button class="btn go" onclick="engineCall('/api/fx/engine/start')"
+                ${killed ? "disabled" : ""}>시작</button>`}
+      <button class="btn" onclick="engineCall('/api/fx/engine/once')">한 바퀴</button>
+      ${killed ? `<button class="btn" onclick="engineCall('/api/fx/engine/release')">킬 해제</button>`
+               : `<button class="btn stop" onclick="engineCall('/api/fx/engine/kill')">킬 스위치</button>`}
+      <button class="btn stop" onclick="engineCall('/api/fx/engine/flatten')">전량 청산</button>
+    </div>
+    ${(g.recent_blocks || []).length ? `<div style="margin-top:9px;font-size:11px;
+        color:var(--faint);line-height:1.6">막힌 이유<br>${
+        g.recent_blocks.slice(0, 3).map(b =>
+          `· ${esc(b.symbol)} — ${esc(b.reason)}`).join("<br>")}</div>` : ""}`;
+}
+
 /* ───────── 갱신 ───────── */
 async function refresh() {
   try {
@@ -300,12 +381,20 @@ async function refresh() {
       const q = await api("/api/fx/quotes");
       quotes = q.quotes;
       if (!window.__focus) {
-        // 처음에는 포지션이 있는 종목, 없으면 비용이 가장 낮은 종목
-        const fxPos = s.positions.find(p => p.tradingview);
-        const first = fxPos?.display?.replace("/", "") || quotes[0]?.canonical;
-        if (first) applyFocus(await api(
-          `/api/fx/focus?symbol=${first}&manual=false`, {method: "POST"}));
+        // 새로고침해도 엔진이 옮겨 둔 종목을 유지한다. 서버 쪽 선택을 먼저
+        // 보지 않고 여기서 기본값을 밀어 넣으면, 신호가 난 종목으로 옮겨 둔
+        // 차트가 페이지를 열 때마다 도로 튕겨 나간다.
+        let f = s.focus?.symbol ? s.focus : null;
+        if (!f) {
+          const fxPos = s.positions.find(p => p.tradingview);
+          const first = fxPos?.display?.replace("/", "") || quotes[0]?.canonical;
+          if (first) f = await api(
+            `/api/fx/focus?symbol=${first}&manual=false`, {method: "POST"});
+        }
+        if (f) applyFocus(f);
       } else { renderStrip(); renderDetail(); }
+      try { renderEngine(await api("/api/fx/engine")); }
+      catch (e) { /* 엔진이 죽어도 차트는 계속 봐야 한다 */ }
     }
   } catch (e) {
     $("#alerts").innerHTML = `<div class="errbox">갱신 실패: ${e.message}</div>`;

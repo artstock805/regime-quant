@@ -11,6 +11,15 @@ FX 상황판 API — 차트는 트레이딩뷰, 데이터·주문은 MT5.
     GET  /api/fx/focus           차트가 지금 보고 있는 종목
     POST /api/fx/focus           차트 종목 바꾸기
 
+    GET  /api/fx/engine          자동매매 엔진 상태 + **검증 판정**
+    POST /api/fx/engine/start    엔진 켜기 (꺼진 채로 시작한다)
+    POST /api/fx/engine/stop     새 진입 중단 (청산은 계속된다)
+    POST /api/fx/engine/kill     킬 스위치 — 조건 없이 멈춘다
+    POST /api/fx/engine/release  킬 스위치 해제
+    POST /api/fx/engine/flatten  우리가 연 포지션 전량 청산
+    POST /api/fx/engine/once     한 바퀴 수동 실행
+    GET  /api/fx/journal         매매 장부
+
 **두 시세는 다르다.** 트레이딩뷰(FX_IDC)는 은행 간 집계고 MT5 는 우리가 체결하는
 브로커 호가다. 차트의 마커와 실제 체결가가 몇 핍 어긋나는 것은 버그가 아니다.
 화면이 그 사실을 숨기지 않는다.
@@ -57,9 +66,14 @@ def _watchlist(cfg) -> list[str]:
     return [str(s).upper() for s in want]
 
 
+# 화면 코드가 바뀌었는데 브라우저가 옛 파일을 들고 있으면, 고친 것이 반영되지
+# 않은 채 "왜 그대로지"를 디버깅하게 된다. 상황판은 매번 새로 받는다.
+NO_CACHE = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
+
+
 @router.get("/fx")
 def fx_page() -> FileResponse:
-    return FileResponse(STATIC / "fx.html")
+    return FileResponse(STATIC / "fx.html", headers=NO_CACHE)
 
 
 @router.get("/api/fx/status")
@@ -196,3 +210,73 @@ def follow(symbol: str) -> None:
         set_focus(symbol, manual=False)
     except HTTPException:
         pass
+
+
+# ═══════════════════════════════════════════════════════════════
+#  자동매매 엔진
+#
+#  **검증 판정을 모든 응답에 싣는다.** 이 신호는 FX 에서 우위가 확인되지
+#  않았고, 화면이 그걸 숨기면 사용자는 검증된 것을 돌리고 있다고 착각한다.
+# ═══════════════════════════════════════════════════════════════
+
+
+def _engine():
+    from ..fx.engine import trader
+    return trader()
+
+
+@router.get("/api/fx/engine")
+def engine_status() -> dict[str, Any]:
+    try:
+        return _engine().status()
+    except MT5Error as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@router.post("/api/fx/engine/start")
+def engine_start() -> dict[str, Any]:
+    try:
+        return _engine().start()
+    except MT5Error as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@router.post("/api/fx/engine/stop")
+def engine_stop() -> dict[str, Any]:
+    """새 진입만 막는다. 들고 있는 것은 계속 청산 판단을 받는다 —
+    정지 버튼이 포지션을 방치하는 버튼이면 위험을 키운다."""
+    return _engine().stop()
+
+
+@router.post("/api/fx/engine/kill")
+def engine_kill(reason: str = "사용자") -> dict[str, Any]:
+    return _engine().kill(reason)
+
+
+@router.post("/api/fx/engine/release")
+def engine_release() -> dict[str, Any]:
+    return _engine().release()
+
+
+@router.post("/api/fx/engine/flatten")
+def engine_flatten() -> dict[str, Any]:
+    try:
+        return {"closed": _engine().flatten()}
+    except MT5Error as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@router.post("/api/fx/engine/once")
+def engine_once() -> dict[str, Any]:
+    """한 바퀴 수동 실행. 엔진이 꺼져 있으면 신호만 계산하고 주문은 내지 않는다."""
+    try:
+        return _engine().run_once()
+    except MT5Error as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@router.get("/api/fx/journal")
+def engine_journal(n: int = 100) -> dict[str, Any]:
+    """무엇을 왜 했는지. **막힌 기록도 남는다** — 없으면 '왜 진입 안 했지'에
+    답할 수 없고, 그러면 사용자가 가드를 꺼 버린다."""
+    return {"rows": _engine().journal.tail(n)}

@@ -139,8 +139,16 @@ def signal_for(
     weight_params: WeightParams | None = None,
     exec_params: ExecParams | None = None,
     costs: Costs | None = None,
+    bars: pd.DataFrame | None = None,
+    feats: pd.DataFrame | None = None,
 ) -> SymbolSignal | None:
-    """종목 하나의 현재 신호. 데이터가 부족하면 None."""
+    """
+    종목 하나의 현재 신호. 데이터가 부족하면 None.
+
+    bars/feats 를 넘기면 그것을 쓴다. FX 는 봉이 MT5 에서 오기 때문이다 —
+    **주문을 낼 브로커의 호가로 신호를 계산해야** 체결과 어긋나지 않는다.
+    넘기지 않으면 기존대로 캐시(바이낸스)에서 읽는다.
+    """
     names = cfg.get("strategies")
     strats = strategies or [s for s in build_all()
                             if not names or s.name in set(names)]
@@ -159,8 +167,10 @@ def signal_for(
     train_months = int(cfg.get("backtest.walk_forward.train_months", 6))
     train_days = train_months * 31
 
-    bars, feats = _load(cfg, symbol, interval, use_derivatives=use_derivatives,
-                        train_days=train_days)
+    if bars is None or feats is None:
+        bars, feats = _load(cfg, symbol, interval,
+                            use_derivatives=use_derivatives,
+                            train_days=train_days)
     if bars.empty or len(bars) < WARMUP_BARS // 2:
         return None
 
