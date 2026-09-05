@@ -18,12 +18,14 @@
 
   /* 화면 전체를 쓴다. 차트가 주인공이라 스크롤로 밀려나면 안 된다. */
   .app{display:grid;height:100vh;
-       grid-template-rows:44px auto 1fr;
+       grid-template-rows:44px auto 1fr var(--histh, 236px);
        grid-template-columns:1fr 330px;
-       grid-template-areas:"top top" "strip strip" "chart side";}
+       grid-template-areas:"top top" "strip strip" "chart side" "hist side";}
+  .app.hist-min{--histh:33px}
   @media(max-width:1000px){
-    .app{grid-template-columns:1fr;grid-template-rows:44px auto 55vh auto;
-         grid-template-areas:"top" "strip" "chart" "side";overflow:auto}
+    .app{grid-template-columns:1fr;
+         grid-template-rows:44px auto 55vh var(--histh, 236px) auto;
+         grid-template-areas:"top" "strip" "chart" "hist" "side";overflow:auto}
     body{overflow:auto}
   }
 
@@ -64,6 +66,38 @@
   .chartnote{position:absolute;left:10px;bottom:8px;z-index:5;
              background:#0d1117d9;border:1px solid var(--line);border-radius:7px;
              padding:5px 10px;font-size:11px;color:var(--faint);max-width:calc(100% - 20px)}
+
+  /* ── 매매 내역 (차트 아래) ── */
+  .hist{grid-area:hist;border-top:1px solid var(--line);background:var(--panel);
+        display:flex;flex-direction:column;min-height:0}
+  .histbar{display:flex;align-items:center;gap:10px;padding:6px 12px;
+           border-bottom:1px solid var(--line);flex:none;font-size:11.5px}
+  .histbar b{font-size:11px;color:var(--dim);letter-spacing:.6px;
+             text-transform:uppercase}
+  .histbar .sum{color:var(--faint);font-variant-numeric:tabular-nums}
+  .histbar .sum em{font-style:normal;color:var(--dim)}
+  .histbar .right{margin-left:auto;display:flex;gap:6px;align-items:center}
+  .histwrap{overflow:auto;min-height:0;flex:1}
+  .app.hist-min .histwrap{display:none}
+  table.hist{width:100%;border-collapse:collapse;font-size:11.5px;
+             font-variant-numeric:tabular-nums}
+  table.hist th{position:sticky;top:0;background:#131922;color:var(--faint);
+                font-weight:600;text-align:right;padding:5px 9px;
+                border-bottom:1px solid var(--line);white-space:nowrap;z-index:1}
+  table.hist th:first-child,table.hist td:first-child{text-align:left}
+  table.hist th.l,table.hist td.l{text-align:left}
+  table.hist td{padding:4px 9px;text-align:right;border-bottom:1px solid #1a212b;
+                white-space:nowrap}
+  table.hist tr.fx{cursor:pointer}
+  table.hist tr.fx:hover td{background:#182230}
+  table.hist tr.mine td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
+  .src{font-size:10px;padding:1px 5px;border-radius:4px;border:1px solid var(--line);
+       color:var(--faint)}
+  .src.mine{color:#9ecbff;border-color:#2d4a6b;background:#132234}
+
+  /* ── 잔고 곡선 ── */
+  .spark{width:100%;height:36px;display:block;margin:8px 0 2px}
+  .sparknote{font-size:10.5px;color:var(--faint);text-align:right}
 
   /* ── 오른쪽 ── */
   .side{grid-area:side;overflow-y:auto;border-left:1px solid var(--line);
@@ -130,17 +164,41 @@
     <div class="chartnote" id="chartnote"></div>
   </div>
 
+  <div class="hist">
+    <div class="histbar">
+      <b>매매 내역</b>
+      <span class="sum" id="histsum">읽는 중…</span>
+      <span class="right">
+        <label style="color:var(--faint);cursor:pointer">
+          <input type="checkbox" id="onlyours" style="vertical-align:-1px">
+          엔진 거래만
+        </label>
+        <select id="histdays" class="btn" style="padding:3px 6px">
+          <option value="7">7일</option>
+          <option value="30" selected>30일</option>
+          <option value="90">90일</option>
+          <option value="365">1년</option>
+        </select>
+        <button class="btn" id="histtoggle" style="padding:3px 9px">접기</button>
+      </span>
+    </div>
+    <div class="histwrap" id="histwrap">
+      <div class="empty" style="padding:10px 12px">읽는 중…</div>
+    </div>
+  </div>
+
   <div class="side">
     <div id="alerts"></div>
 
     <div class="card">
-      <h3>자동매매</h3>
-      <div id="engine"><div class="empty">확인 중…</div></div>
+      <h3>계좌 <span style="text-transform:none;color:var(--faint);
+        font-weight:400" id="acctkind"></span></h3>
+      <div id="account"><div class="empty">확인 중…</div></div>
     </div>
 
     <div class="card">
-      <h3>계좌</h3>
-      <div id="account"><div class="empty">확인 중…</div></div>
+      <h3>자동매매</h3>
+      <div id="engine"><div class="empty">확인 중…</div></div>
     </div>
 
     <div class="card">
@@ -166,7 +224,7 @@ const esc = v => String(v ?? "").replace(/[&<>"']/g,
   c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;",
          '"': "&quot;", "'": "&#39;"}[c]));
 let widget = null, shown = null, quotes = [], provider = "FX_IDC";
-let holding = new Set(), timer = null;
+let holding = new Set(), timer = null, tick = 0;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -275,14 +333,7 @@ function renderStatus(s) {
       실계좌로 넘어가기 전에 여기서 충분히 돌려 보세요.</div>`);
   $("#alerts").innerHTML = w.join("");
 
-  $("#account").innerHTML = [
-    ["잔고", `${a.balance.toFixed(2)} ${a.currency}`],
-    ["평가액", `${a.equity.toFixed(2)} ${a.currency}`],
-    ["미실현", `<span class="${a.equity - a.balance >= 0 ? "pos" : "neg"}">${
-      (a.equity - a.balance >= 0 ? "+" : "")}${(a.equity - a.balance).toFixed(2)}</span>`],
-    ["여유 증거금", a.margin_free.toFixed(2)],
-    ["레버리지", `1:${a.leverage}`],
-  ].map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join("");
+  renderAccount(a);
 
   holding = new Set(s.positions.map(p => p.symbol));
   const box = $("#positions");
@@ -316,6 +367,189 @@ function renderStatus(s) {
     });
   }
 }
+
+/* ───────── 잔고 현황 ─────────
+   status(5초)는 잔고·평가액처럼 계속 움직이는 값을 준다. balance(15초)는
+   실현손익·입금액·수익률처럼 천천히 바뀌는 값을 준다. 둘을 합쳐 한 카드에
+   그린다 — 평가액이 5초마다 살아 움직이면서 "이게 벌어서 이렇게 된 건지"도
+   같이 보이게 하려는 것이다. */
+let bal = null;
+
+// 국면 이름. 서버는 내부 값(uptrend)을 주는데 화면은 한국어로 통일한다.
+const REGIME_KO = {uptrend: "상승추세", downtrend: "하락추세",
+                   range: "횡보", high_vol: "고변동"};
+
+// 가격 자릿수는 종목마다 다르다(엔 3자리, 유로 5자리, 금 2자리).
+// 거래 내역에는 digits 정보가 없으므로 뒤의 0 만 떼서 원래 정밀도를 살린다.
+function px(v) {
+  const n = Number(v ?? 0);
+  return n.toFixed(5).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function money(v, cur) {
+  const n = Number(v ?? 0);
+  return n.toLocaleString(undefined, {minimumFractionDigits: 2,
+                                      maximumFractionDigits: 2})
+         + (cur ? " " + cur : "");
+}
+
+function signed(v) {
+  const n = Number(v ?? 0);
+  const cls = n > 0 ? "pos" : (n < 0 ? "neg" : "");
+  return `<span class="${cls}">${n > 0 ? "+" : ""}${n.toFixed(2)}</span>`;
+}
+
+function sparkline(curve) {
+  // MT5 는 과거 잔고 스냅샷을 주지 않는다. 그래서 이 곡선은 **실현손익
+  // 누적**이다 (미실현은 안 들어간다). 곡선이 실제 계좌 곡선인 척하면
+  // 안 되므로 아래에 그렇게 적어 둔다.
+  if (!curve || curve.length < 2) return "";
+  const ys = curve.map(p => p.balance);
+  const lo = Math.min(...ys), hi = Math.max(...ys);
+  const span = (hi - lo) || 1;
+  const W = 100, H = 36, pad = 3;
+  const pts = curve.map((p, i) => {
+    const x = (i / (curve.length - 1)) * W;
+    const y = H - pad - ((p.balance - lo) / span) * (H - pad * 2);
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+  const up = ys[ys.length - 1] >= ys[0];
+  const col = up ? "var(--up)" : "var(--down)";
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+      <polyline points="${pts}" fill="none" stroke="${col}"
+                stroke-width="1.2" vector-effect="non-scaling-stroke"/>
+    </svg>
+    <div class="sparknote">실현손익 누적 ${curve.length}건 ·
+      ${lo.toFixed(0)} ~ ${hi.toFixed(0)}</div>`;
+}
+
+function renderAccount(a) {
+  $("#acctkind").textContent = a.is_demo ? "데모" : "실계좌";
+  const cur = a.currency;
+  const rows = [
+    ["잔고", money(a.balance, cur)],
+    ["평가액", `<b>${money(a.equity, cur)}</b>`],
+    ["미실현", signed(a.equity - a.balance)],
+  ];
+  if (bal) {
+    rows.push(["실현 손익", signed(bal.realised)]);
+    if (bal.funding?.deposit) rows.push(["입금액", money(bal.funding.deposit, cur)]);
+    if (bal.return_pct !== null && bal.return_pct !== undefined)
+      rows.push(["입금 대비", `<span class="${bal.return_pct >= 0 ? "pos" : "neg"}">${
+        bal.return_pct >= 0 ? "+" : ""}${bal.return_pct.toFixed(2)}%</span>`]);
+    rows.push(["사용 증거금", money(bal.margin_used, "")]);
+  }
+  rows.push(["여유 증거금", money(a.margin_free, "")]);
+  rows.push(["레버리지", `1:${a.leverage}`]);
+
+  $("#account").innerHTML =
+    rows.map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`)
+        .join("") + (bal ? sparkline(bal.curve) : "");
+}
+
+async function refreshBalance() {
+  try { bal = await api("/api/fx/balance?days=365"); }
+  catch (e) { /* 잔고 부가정보가 없어도 기본 숫자는 status 가 준다 */ }
+}
+
+/* ───────── 매매 내역 ─────────
+   **MT5 내역이 진실이다.** 우리 장부는 앱이 켜져 있던 동안만 안다. 손절이
+   새벽에 브로커에서 터졌거나 사용자가 MT5 창에서 직접 닫으면 장부에는 아무
+   줄도 없다. 그때 장부만 보여 주면 화면은 "거래 없음"이라 말하는데 잔고는
+   줄어 있다 — 그게 최악이다. */
+
+function histBlock(name, b) {
+  if (!b || !b.trades) return `<em>${name}</em> 청산된 거래 없음`;
+  const wr = b.win_rate === null ? "—" : (b.win_rate * 100).toFixed(0) + "%";
+  const ar = b.avg_r === null || b.avg_r === undefined
+             ? "" : ` · 평균 ${b.avg_r >= 0 ? "+" : ""}${b.avg_r.toFixed(2)}R`;
+  const net = b.net >= 0 ? "pos" : "neg";
+  // "비용 -0.95" 라고 쓰면 아꼈다는 뜻으로 읽힌다. 이 숫자의 부호는
+  // **손익에 준 영향**이므로 이름을 그대로 밝힌다.
+  return `<em>${name}</em> ${b.trades}건 ·
+    <span class="${net}">${b.net >= 0 ? "+" : ""}${b.net.toFixed(2)}</span> ·
+    승률 ${wr}${ar} · 수수료·스왑 ${b.costs.toFixed(2)}`;
+}
+
+async function refreshHistory() {
+  const days = $("#histdays").value;
+  const mine = $("#onlyours").checked;
+  let d;
+  try {
+    d = await api(`/api/fx/history?days=${days}&only_ours=${mine}&limit=200`);
+  } catch (e) {
+    $("#histsum").textContent = "내역을 읽지 못했습니다";
+    $("#histwrap").innerHTML = `<div class="errbox" style="margin:10px 12px">${
+      esc(e.message)}</div>`;
+    return;
+  }
+  const s = d.summary;
+  // 엔진 성적과 사람이 손으로 한 거래를 **절대 한 덩어리로 합치지 않는다.**
+  // 합치면 엔진이 벌었는지 사람이 벌었는지 알 수 없다.
+  $("#histsum").innerHTML =
+    histBlock("엔진", s.ours) + " &nbsp;|&nbsp; " + histBlock("수동", s.manual)
+    + ` &nbsp;|&nbsp; <em>오늘</em> ${signed(s.realised_today)}`;
+
+  if (!d.trades.length) {
+    $("#histwrap").innerHTML =
+      `<div class="empty" style="padding:10px 12px">${
+        mine ? "엔진이 청산한 거래가 아직 없습니다." :
+               "이 기간에 청산된 거래가 없습니다."}</div>`;
+    return;
+  }
+
+  const rows = d.trades.map(t => {
+    const r = (t.r_multiple === null || t.r_multiple === undefined)
+              ? '<span style="color:var(--faint)">—</span>'
+              : `<span class="${t.r_multiple >= 0 ? "pos" : "neg"}">${
+                  t.r_multiple >= 0 ? "+" : ""}${t.r_multiple.toFixed(2)}</span>`;
+    const held = t.held_minutes >= 1440
+      ? (t.held_minutes / 1440).toFixed(1) + "일"
+      : (t.held_minutes >= 60 ? (t.held_minutes / 60).toFixed(1) + "시간"
+                              : t.held_minutes.toFixed(0) + "분");
+    return `<tr class="${t.is_fx ? "fx" : ""} ${t.ours ? "mine" : ""}"
+                ${t.is_fx ? `data-sym="${esc(t.display).replace("/", "")}"` : ""}>
+      <td class="l">${esc(t.closed_at.slice(0, 16).replace("T", " "))}</td>
+      <td class="l"><b>${esc(t.display)}</b></td>
+      <td class="l"><span class="${t.side === "LONG" ? "pos" : "neg"}">${
+        t.side === "LONG" ? "롱" : "숏"}</span></td>
+      <td>${t.volume}</td>
+      <td>${px(t.entry_price)}</td>
+      <td>${px(t.exit_price)}</td>
+      <td>${signed(t.profit)}</td>
+      <td>${r}</td>
+      <td>${esc(held)}</td>
+      <td class="l">${t.regime ? esc(REGIME_KO[t.regime] ?? t.regime) : ""}</td>
+      <td class="l"><span class="src ${t.ours ? "mine" : ""}">${
+        t.ours ? "엔진" : "수동"}</span></td>
+    </tr>`;
+  }).join("");
+
+  $("#histwrap").innerHTML = `<table class="hist">
+    <thead><tr>
+      <th class="l">청산</th><th class="l">종목</th><th class="l">방향</th>
+      <th>수량</th><th>진입</th><th>청산</th><th>손익</th><th>R</th>
+      <th>보유</th><th class="l">국면</th><th class="l">출처</th>
+    </tr></thead><tbody>${rows}</tbody></table>` +
+    (d.truncated ? `<div class="empty" style="padding:8px 12px">
+       …그 밖에 ${d.truncated}건 더 있습니다.</div>` : "");
+
+  // FX 거래를 누르면 차트가 그 종목으로 간다. 수동 선택이므로 엔진이 덮지 않는다.
+  document.querySelectorAll("table.hist tr.fx").forEach(el => {
+    el.onclick = async () => {
+      applyFocus(await api(
+        `/api/fx/focus?symbol=${el.dataset.sym}&manual=true`, {method: "POST"}));
+    };
+  });
+}
+
+$("#histdays").onchange = refreshHistory;
+$("#onlyours").onchange = refreshHistory;
+$("#histtoggle").onclick = () => {
+  const app = document.querySelector(".app");
+  app.classList.toggle("hist-min");
+  $("#histtoggle").textContent = app.classList.contains("hist-min") ? "펼치기" : "접기";
+};
 
 /* ───────── 자동매매 엔진 ─────────
    이 신호는 FX 에서 우위가 확인되지 않았다. 화면이 그 판정을 지우면
@@ -395,7 +629,13 @@ async function refresh() {
       } else { renderStrip(); renderDetail(); }
       try { renderEngine(await api("/api/fx/engine")); }
       catch (e) { /* 엔진이 죽어도 차트는 계속 봐야 한다 */ }
+
+      // 잔고 부가정보와 내역은 MT5 거래 내역을 훑어야 해서 느리다.
+      // 5초마다 부르면 터미널을 붙잡아 시세 갱신이 밀린다. 15초로 둔다.
+      if (tick % 3 === 0) { await refreshBalance(); renderAccount(s.account);
+                            await refreshHistory(); }
     }
+    tick++;
   } catch (e) {
     $("#alerts").innerHTML = `<div class="errbox">갱신 실패: ${e.message}</div>`;
   }

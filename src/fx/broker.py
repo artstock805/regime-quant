@@ -28,15 +28,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .mt5 import (
-    MT5Error, _lock, _mt5, account, initialise, positions, symbol_info,
+    MAGIC, MT5Error, PREFIX, _lock, _mt5, account, initialise, positions,
+    symbol_info,
 )
 
-# 우리 주문임을 표시하는 번호. 사람이 손으로 낸 주문이나 다른 EA 의 포지션을
-# 우리 것으로 착각해 청산하면 안 된다.
-MAGIC = 770315
-
-# 우리 태그의 접두사. comment 로 실려 나가고 돌아온다.
-PREFIX = "rq"
+# MAGIC(우리 주문 표시 번호)과 PREFIX(태그 접두사)는 mt5.py 에 있다.
+# 거래 내역을 읽는 쪽도 같은 값으로 "우리 거래"를 골라내야 하기 때문이다.
+# 여기서 이름을 다시 내보내므로 broker.MAGIC 으로 쓰던 곳은 그대로 동작한다.
+__all__ = ["MAGIC", "PREFIX"]
 
 # 브로커가 허용하는 체결 방식은 종목마다 다르다. 안 맞으면 10030 으로 거부된다.
 _FILL_FOK, _FILL_IOC = 1, 2

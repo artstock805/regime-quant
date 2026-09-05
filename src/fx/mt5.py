@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -32,6 +32,12 @@ TIMEFRAMES = {
 
 _lock = threading.RLock()
 _initialised = False
+
+# 우리 주문임을 표시하는 번호와 태그 접두사. **거래 내역을 읽는 쪽과 주문을
+# 내는 쪽이 같은 값을 봐야 한다.** 양쪽에 따로 적어 두면 한쪽만 바뀌었을 때
+# 과거 거래가 조용히 "남의 것"으로 분류되고, 성적이 틀리게 나온다.
+MAGIC = 770315
+PREFIX = "rq"
 
 
 class MT5Error(RuntimeError):
@@ -259,3 +265,127 @@ def status() -> dict:
         "positions": list(pos.values()),
         "message": "",
     }
+
+
+# ─── 거래 내역 ───────────────────────────────────────────────────
+#
+# **이것이 실현손익의 진실이다.** 우리 장부(Journal)는 앱이 켜져 있던 동안만
+# 안다. 손절이 새벽에 브로커에서 터졌거나 사용자가 MT5 창에서 직접 닫았으면
+# 장부에는 아무것도 없고 여기에만 남는다. 화면은 이쪽을 보여 준다.
+
+# MT5 의 deal.entry — 이 거래가 포지션을 열었나 닫았나.
+_ENTRY_IN, _ENTRY_OUT, _ENTRY_INOUT, _ENTRY_OUT_BY = 0, 1, 2, 3
+
+# deal.type — 2 부터는 매매가 아니라 입출금·크레딧 같은 잔고 조작이다.
+_TYPE_BUY, _TYPE_SELL, _TYPE_BALANCE = 0, 1, 2
+
+
+def deals(days: int = 90) -> list[dict]:
+    """
+    기간 내 거래(deal) 원본을 정규화해서 돌려준다.
+
+    **시간대 주의.** MT5 는 서버 시간으로 조회 구간을 해석하는데 브로커
+    서버가 UTC 가 아니다(XM 은 GMT+2/+3). 그래서 앞뒤로 하루씩 넉넉히
+    요청하고 **받은 뒤에 실제 시각으로 잘라낸다.** 안 그러면 경계에 걸친
+    거래가 조용히 빠진다.
+    """
+    now = datetime.now(timezone.utc)
+    frm = now - timedelta(days=days)
+    with _lock:
+        initialise()
+        rows = _mt5().history_deals_get(frm - timedelta(days=1),
+                                        now + timedelta(days=1))
+    out: list[dict] = []
+    for d in (rows or []):
+        at = datetime.fromtimestamp(d.time, timezone.utc)
+        if at < frm:
+            continue
+        out.append({
+            "deal": int(d.ticket),
+            "order": int(getattr(d, "order", 0) or 0),
+            "position_id": int(getattr(d, "position_id", 0) or 0),
+            "at": at.isoformat(),
+            "epoch": int(d.time),
+            "symbol": str(getattr(d, "symbol", "") or ""),
+            "type": int(d.type),
+            "entry": int(getattr(d, "entry", _ENTRY_IN)),
+            "volume": float(getattr(d, "volume", 0.0) or 0.0),
+            "price": float(getattr(d, "price", 0.0) or 0.0),
+            "profit": float(getattr(d, "profit", 0.0) or 0.0),
+            "commission": float(getattr(d, "commission", 0.0) or 0.0),
+            "swap": float(getattr(d, "swap", 0.0) or 0.0),
+            "fee": float(getattr(d, "fee", 0.0) or 0.0),
+            "magic": int(getattr(d, "magic", 0) or 0),
+            "comment": str(getattr(d, "comment", "") or ""),
+        })
+    out.sort(key=lambda r: r["epoch"])
+    return out
+
+
+def _weighted(rows: list[dict], key: str) -> float:
+    vol = sum(r["volume"] for r in rows)
+    if vol <= 0:
+        return rows[0][key] if rows else 0.0
+    return sum(r[key] * r["volume"] for r in rows) / vol
+
+
+def closed_trades(days: int = 90, raw: list[dict] | None = None) -> list[dict]:
+    """
+    거래들을 **왕복 한 건**으로 묶는다. 진입 체결과 청산 체결은 따로 오므로
+    position_id 로 모아야 "언제 들어가서 언제 나왔고 얼마 남았나"가 나온다.
+
+    아직 열려 있는 포지션(청산 체결이 없는 것)은 제외한다 — 그건 positions()
+    가 보여 준다. 손익은 수수료와 스왑까지 **다 뺀 순액**이다. 수수료를 빼지
+    않으면 화면 숫자가 계좌 잔고와 어긋나고, 그건 신뢰를 깨뜨린다.
+    """
+    src = raw if raw is not None else deals(days)
+    groups: dict[int, list[dict]] = {}
+    for d in src:
+        if d["type"] > _TYPE_SELL:          # 입출금은 매매가 아니다
+            continue
+        groups.setdefault(d["position_id"], []).append(d)
+
+    trades: list[dict] = []
+    for pid, g in groups.items():
+        ins = [d for d in g if d["entry"] in (_ENTRY_IN, _ENTRY_INOUT)]
+        outs = [d for d in g if d["entry"] in (_ENTRY_OUT, _ENTRY_OUT_BY,
+                                               _ENTRY_INOUT)]
+        if not ins or not outs:
+            continue                        # 아직 열려 있다
+        entry_at = min(d["epoch"] for d in ins)
+        exit_at = max(d["epoch"] for d in outs)
+        net = sum(d["profit"] + d["commission"] + d["swap"] + d["fee"] for d in g)
+        trades.append({
+            "position_id": pid,
+            "symbol": ins[0]["symbol"],
+            # 진입 체결이 매수였으면 롱이다. 청산 체결은 반대 방향이므로 보지 않는다.
+            "side": "LONG" if ins[0]["type"] == _TYPE_BUY else "SHORT",
+            "volume": round(sum(d["volume"] for d in ins), 4),
+            "entry_price": _weighted(ins, "price"),
+            "exit_price": _weighted(outs, "price"),
+            "opened_at": datetime.fromtimestamp(entry_at, timezone.utc).isoformat(),
+            "closed_at": datetime.fromtimestamp(exit_at, timezone.utc).isoformat(),
+            "held_minutes": round((exit_at - entry_at) / 60, 1),
+            "profit": round(net, 2),
+            "gross": round(sum(d["profit"] for d in g), 2),
+            "commission": round(sum(d["commission"] + d["fee"] for d in g), 2),
+            "swap": round(sum(d["swap"] for d in g), 2),
+            # 우리가 연 것인가. 사람이 손으로 연 금·지수 거래도 같이 나오므로
+            # 섞이면 성적을 잘못 읽는다.
+            "ours": any(d["magic"] == MAGIC
+                        or d["comment"].strip().startswith(PREFIX) for d in g),
+            "comment": next((d["comment"] for d in ins if d["comment"]), ""),
+        })
+    trades.sort(key=lambda t: t["closed_at"], reverse=True)
+    return trades
+
+
+def cash_flows(days: int = 3650, raw: list[dict] | None = None) -> dict:
+    """입출금 합계. 수익률을 재려면 '얼마를 넣었는지'를 알아야 한다."""
+    src = raw if raw is not None else deals(days)
+    dep = sum(d["profit"] for d in src
+              if d["type"] == _TYPE_BALANCE and d["profit"] > 0)
+    wit = sum(d["profit"] for d in src
+              if d["type"] == _TYPE_BALANCE and d["profit"] < 0)
+    return {"deposit": round(dep, 2), "withdrawal": round(wit, 2),
+            "net_funding": round(dep + wit, 2)}
