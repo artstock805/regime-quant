@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FX 상황판</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#151b24; --panel2:#1b222d; --line:#232b38;
+    --fg:#e6edf3; --dim:#8b98a9; --faint:#5c6875;
+    --up:#3fb950; --down:#f85149; --accent:#58a6ff; --warn:#d29922;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--fg);overflow:hidden;
+       font:13px/1.5 "Malgun Gothic","Segoe UI",system-ui,sans-serif}
+  a{color:var(--accent);text-decoration:none}
+
+  /* 화면 전체를 쓴다. 차트가 주인공이라 스크롤로 밀려나면 안 된다. */
+  .app{display:grid;height:100vh;
+       grid-template-rows:44px auto 1fr;
+       grid-template-columns:1fr 330px;
+       grid-template-areas:"top top" "strip strip" "chart side";}
+  @media(max-width:1000px){
+    .app{grid-template-columns:1fr;grid-template-rows:44px auto 55vh auto;
+         grid-template-areas:"top" "strip" "chart" "side";overflow:auto}
+    body{overflow:auto}
+  }
+
+  /* ── 상단 ── */
+  .top{grid-area:top;display:flex;align-items:center;gap:12px;padding:0 14px;
+       border-bottom:1px solid var(--line);background:var(--panel)}
+  .top .brand{font-weight:700;font-size:13.5px}
+  .top .acct{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums}
+  .chip{background:#1c2532;border:1px solid var(--line);border-radius:999px;
+        padding:2px 9px;font-size:11px;color:var(--dim)}
+  .chip.demo{background:#12251a;border-color:#245c33;color:#7ee89b}
+  .chip.real{background:#3a1010;border-color:#7a2020;color:#ff9a9a}
+  .top nav{margin-left:auto;display:flex;gap:5px}
+  .top nav a{padding:4px 11px;border-radius:7px;border:1px solid var(--line);
+             font-size:12px;color:var(--dim)}
+  .top nav a.on{background:var(--panel2);color:var(--fg);border-color:#3a4757}
+
+  /* ── 통화쌍 띠 ── */
+  .strip{grid-area:strip;display:flex;gap:7px;padding:9px 14px;overflow-x:auto;
+         border-bottom:1px solid var(--line);background:#11161e}
+  .strip::-webkit-scrollbar{height:6px}
+  .strip::-webkit-scrollbar-thumb{background:#2a3340;border-radius:3px}
+  .pair{flex:none;min-width:132px;cursor:pointer;background:var(--panel);
+        border:1px solid var(--line);border-radius:9px;padding:7px 10px;
+        transition:.12s}
+  .pair:hover{border-color:#3a4757}
+  .pair.on{border-color:var(--accent);background:#12202c}
+  .pair.holding{border-left:3px solid var(--up)}
+  .pair .nm{font-weight:700;font-size:12.5px;display:flex;gap:6px;align-items:center}
+  .pair .px{font-variant-numeric:tabular-nums;font-size:13px;margin-top:2px}
+  .pair .sub{color:var(--faint);font-size:10.5px;margin-top:2px;
+             font-variant-numeric:tabular-nums}
+  .cost-good{color:var(--up)} .cost-mid{color:var(--warn)} .cost-bad{color:var(--down)}
+
+  /* ── 차트 ── */
+  .chart{grid-area:chart;position:relative;background:#0b0f15}
+  #tv{position:absolute;inset:0}
+  .chartnote{position:absolute;left:10px;bottom:8px;z-index:5;
+             background:#0d1117d9;border:1px solid var(--line);border-radius:7px;
+             padding:5px 10px;font-size:11px;color:var(--faint);max-width:calc(100% - 20px)}
+
+  /* ── 오른쪽 ── */
+  .side{grid-area:side;overflow-y:auto;border-left:1px solid var(--line);
+        background:var(--panel);padding:12px}
+  .side h3{font-size:11px;margin:0 0 9px;color:var(--dim);letter-spacing:.6px;
+           text-transform:uppercase;font-weight:700}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+        padding:11px 13px;margin-bottom:11px}
+  .kv{display:flex;justify-content:space-between;gap:10px;padding:4px 0;
+      border-bottom:1px dashed #232b38;font-size:12.5px}
+  .kv:last-child{border-bottom:0}
+  .kv span:first-child{color:var(--dim)}
+  .kv span:last-child{font-variant-numeric:tabular-nums}
+  .pos{color:var(--up)} .neg{color:var(--down)}
+  .empty{color:var(--faint);font-size:12px;padding:6px 0}
+  .errbox{background:#1d1213;border:1px solid #5c2424;border-radius:9px;
+          padding:10px 12px;font-size:12px;color:#ff9a9a;white-space:pre-wrap;
+          margin-bottom:11px}
+  .warnbox{background:#1d1a12;border:1px solid #4a3a12;border-radius:9px;
+           padding:10px 12px;font-size:11.5px;color:#c9b070;margin-bottom:11px}
+  .poscard{border-left:3px solid var(--line);padding-left:9px;margin-bottom:9px;
+           cursor:pointer}
+  .poscard.long{border-left-color:var(--up)}
+  .poscard.short{border-left-color:var(--down)}
+  .poscard.nofx{cursor:default;opacity:.7}
+  .poscard .h{display:flex;gap:7px;align-items:baseline;font-size:12.5px}
+  .poscard .h b{font-size:13px}
+  .poscard .d{color:var(--faint);font-size:11px;font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="top">
+    <span class="brand">FX 상황판</span>
+    <span class="chip" id="conn">연결 확인 중</span>
+    <span class="acct" id="acct"></span>
+    <nav>
+      <a href="/" class="on">FX 상황판</a>
+      <a href="/review">복기</a>
+    </nav>
+  </div>
+
+  <div class="strip" id="strip"></div>
+
+  <div class="chart">
+    <div id="tv"></div>
+    <div class="chartnote" id="chartnote"></div>
+  </div>
+
+  <div class="side">
+    <div id="alerts"></div>
+
+    <div class="card">
+      <h3>계좌</h3>
+      <div id="account"><div class="empty">확인 중…</div></div>
+    </div>
+
+    <div class="card">
+      <h3>포지션 <span style="text-transform:none;color:var(--faint);
+        font-weight:400">MT5 실제</span></h3>
+      <div id="positions"><div class="empty">열린 포지션이 없습니다.</div></div>
+    </div>
+
+    <div class="card">
+      <h3>선택 종목</h3>
+      <div id="detail"><div class="empty">통화쌍을 고르세요.</div></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://s3.tradingview.com/tv.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+let widget = null, shown = null, quotes = [], provider = "FX_IDC";
+let holding = new Set(), timer = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const b = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(b.detail || r.status);
+  return b;
+}
+
+/* ───────── 차트 ─────────
+   트레이딩뷰 위젯이 화면의 주인공이다. 종목이 바뀔 때만 다시 만든다 —
+   매 갱신마다 새로 만들면 차트가 깜빡이고 사용자가 그려 둔 것이 사라진다. */
+function showChart(tvSymbol, interval = "60") {
+  if (shown === tvSymbol) return;
+  shown = tvSymbol;
+  $("#tv").innerHTML = "";
+  widget = new TradingView.widget({
+    container_id: "tv", autosize: true,
+    symbol: tvSymbol, interval, timezone: "Asia/Seoul",
+    theme: "dark", style: "1", locale: "kr",
+    toolbar_bg: "#0d1117", hide_side_toolbar: false,
+    allow_symbol_change: false,          // 종목은 아래 띠에서 고른다
+    withdateranges: true, details: false,
+    studies: ["RSI@tv-basicstudies", "MASimple@tv-basicstudies"],
+  });
+}
+
+/* ───────── 통화쌍 띠 ───────── */
+function costClass(v) {
+  if (v == null) return "";
+  return v <= 5 ? "cost-good" : v <= 10 ? "cost-mid" : "cost-bad";
+}
+
+function renderStrip() {
+  $("#strip").innerHTML = quotes.map(q => {
+    const cur = q.canonical === (window.__focus || "");
+    const hold = holding.has(q.mt5);
+    const px = q.bid != null ? q.bid.toFixed(q.digits ?? 5) : "—";
+    return `<div class="pair ${cur ? "on" : ""} ${hold ? "holding" : ""}"
+              data-sym="${q.canonical}">
+      <div class="nm">${q.display}${hold ? ' <span style="color:var(--up)">●</span>' : ""}</div>
+      <div class="px">${px}</div>
+      <div class="sub">스프레드 ${q.spread_pips ?? "—"}핍 ·
+        <span class="${costClass(q.cost_over_r_pct)}">비용 ${q.cost_over_r_pct ?? "—"}%</span></div>
+    </div>`;
+  }).join("");
+  document.querySelectorAll(".pair").forEach(el => {
+    el.onclick = async () => {
+      const f = await api(`/api/fx/focus?symbol=${el.dataset.sym}&manual=true`,
+                          {method: "POST"});
+      applyFocus(f);
+    };
+  });
+}
+
+function applyFocus(f) {
+  if (!f || !f.symbol) return;
+  window.__focus = f.symbol;
+  showChart(f.tradingview);
+  $("#chartnote").innerHTML =
+    `<b>${f.display}</b> · 차트 ${f.tradingview} (트레이딩뷰) ·
+     주문 ${f.mt5} (MT5) —
+     <span style="color:var(--warn)">두 시세는 제공자가 달라 몇 핍 어긋납니다.
+     체결은 MT5 호가 기준입니다.</span>`;
+  renderStrip();
+  renderDetail();
+}
+
+function renderDetail() {
+  const q = quotes.find(x => x.canonical === window.__focus);
+  if (!q) { $("#detail").innerHTML = '<div class="empty">—</div>'; return; }
+  $("#detail").innerHTML = [
+    ["매도호가 (bid)", q.bid?.toFixed(q.digits ?? 5) ?? "—"],
+    ["매수호가 (ask)", q.ask?.toFixed(q.digits ?? 5) ?? "—"],
+    ["스프레드", `${q.spread_pips ?? "—"} 핍`],
+    ["ATR(14)", q.atr ?? "—"],
+    ["1R (손절폭)", q.one_r ?? "—"],
+    ["비용 / 1R", `<span class="${costClass(q.cost_over_r_pct)}">${
+      q.cost_over_r_pct ?? "—"}%</span>`],
+  ].map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join("");
+}
+
+/* ───────── 계좌·포지션 ───────── */
+function renderStatus(s) {
+  const c = $("#conn");
+  if (!s.connected) {
+    c.textContent = "MT5 연결 안 됨"; c.className = "chip real";
+    $("#alerts").innerHTML = `<div class="errbox">${s.message}</div>`;
+    $("#account").innerHTML = '<div class="empty">—</div>';
+    return;
+  }
+  const a = s.account;
+  c.textContent = a.is_demo ? "데모 계좌" : "실계좌";
+  c.className = "chip " + (a.is_demo ? "demo" : "real");
+  $("#acct").textContent =
+    `${a.login} · ${a.server} · ${a.currency} ${a.balance.toLocaleString(undefined,
+      {minimumFractionDigits:2, maximumFractionDigits:2})}`;
+
+  const w = [];
+  if (!a.trade_allowed)
+    w.push(`<div class="errbox">MT5 에서 자동매매가 꺼져 있습니다.
+      도구 &gt; 옵션 &gt; Expert Advisors 에서 켜세요.</div>`);
+  if (!a.is_demo)
+    w.push(`<div class="errbox"><b>실계좌입니다.</b> 실제 돈이 오갑니다.</div>`);
+  else
+    w.push(`<div class="warnbox"><b>데모 계좌</b>에서 돌고 있습니다 — 가짜 돈입니다.
+      실계좌로 넘어가기 전에 여기서 충분히 돌려 보세요.</div>`);
+  $("#alerts").innerHTML = w.join("");
+
+  $("#account").innerHTML = [
+    ["잔고", `${a.balance.toFixed(2)} ${a.currency}`],
+    ["평가액", `${a.equity.toFixed(2)} ${a.currency}`],
+    ["미실현", `<span class="${a.equity - a.balance >= 0 ? "pos" : "neg"}">${
+      (a.equity - a.balance >= 0 ? "+" : "")}${(a.equity - a.balance).toFixed(2)}</span>`],
+    ["여유 증거금", a.margin_free.toFixed(2)],
+    ["레버리지", `1:${a.leverage}`],
+  ].map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join("");
+
+  holding = new Set(s.positions.map(p => p.symbol));
+  const box = $("#positions");
+  if (!s.positions.length) {
+    box.innerHTML = '<div class="empty">열린 포지션이 없습니다.</div>';
+  } else {
+    box.innerHTML = s.positions.map(p => {
+      // 이 앱은 FX 전용이다. 계좌에 금·지수 포지션이 섞여 있을 수 있는데,
+      // 우리 매핑으로는 차트를 못 띄우므로 그 사실을 그대로 보여 준다.
+      const isFx = !!p.tradingview;
+      return `<div class="poscard ${p.side === "LONG" ? "long" : "short"}
+                   ${isFx ? "" : "nofx"}"
+           ${isFx ? `data-sym="${(p.display ?? p.symbol).replace("/", "")}"` : ""}>
+        <div class="h"><b>${p.display ?? p.symbol}</b>
+          <span class="${p.side === "LONG" ? "pos" : "neg"}">${
+            p.side === "LONG" ? "롱" : "숏"} ${p.volume}</span>
+          <span class="${p.profit >= 0 ? "pos" : "neg"}" style="margin-left:auto">${
+            p.profit >= 0 ? "+" : ""}${p.profit.toFixed(2)}</span></div>
+        <div class="d">진입 ${p.entry_price} → ${p.current_price}
+          ${p.stop_loss ? ` · 손절 ${p.stop_loss}` : ' · <span style="color:var(--down)">손절 없음</span>'}
+          ${p.take_profit ? ` · 목표 ${p.take_profit}` : ""}
+          ${isFx ? "" : ' · <span style="color:var(--faint)">FX 아님 — 이 앱이 연 것이 아닙니다</span>'}</div>
+      </div>`;
+    }).join("");
+    document.querySelectorAll(".poscard[data-sym]").forEach(el => {
+      el.onclick = async () => {
+        const f = await api(`/api/fx/focus?symbol=${el.dataset.sym}&manual=true`,
+                            {method: "POST"});
+        applyFocus(f);
+      };
+    });
+  }
+}
+
+/* ───────── 갱신 ───────── */
+async function refresh() {
+  try {
+    const s = await api("/api/fx/status");
+    provider = s.provider || provider;
+    renderStatus(s);
+    if (s.connected) {
+      const q = await api("/api/fx/quotes");
+      quotes = q.quotes;
+      if (!window.__focus) {
+        // 처음에는 포지션이 있는 종목, 없으면 비용이 가장 낮은 종목
+        const fxPos = s.positions.find(p => p.tradingview);
+        const first = fxPos?.display?.replace("/", "") || quotes[0]?.canonical;
+        if (first) applyFocus(await api(
+          `/api/fx/focus?symbol=${first}&manual=false`, {method: "POST"}));
+      } else { renderStrip(); renderDetail(); }
+    }
+  } catch (e) {
+    $("#alerts").innerHTML = `<div class="errbox">갱신 실패: ${e.message}</div>`;
+  }
+  clearTimeout(timer);
+  timer = setTimeout(refresh, 5000);
+}
+
+refresh();
+</script>
+</body>
+</html>

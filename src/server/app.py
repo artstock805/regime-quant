@@ -30,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from ..config import load_config
 from ..regime import KOREAN, Regime
 from .home import router as home_router
+from .fx_api import router as fx_router
 from .live_api import router as live_router
 from .session import Session, build_session, first_traded_bar
 
@@ -63,14 +64,15 @@ def get_session() -> Session:
 # "/" 는 홈(온보딩)이고 상황판은 "/cockpit" 이다. 아이콘을 눌렀을 때 처음 보이는
 # 것이 데이터도 없이 실패하는 상황판이면 안 된다.
 
+app.include_router(fx_router)
 app.include_router(live_router)
 app.include_router(home_router)
 
 
 @app.get("/")
-def live_page() -> FileResponse:
-    """본 화면은 자동매매다."""
-    return FileResponse(STATIC / "live.html")
+def index() -> FileResponse:
+    """본 화면은 FX 상황판 — 트레이딩뷰 차트가 중심이다."""
+    return FileResponse(STATIC / "fx.html")
 
 
 @app.get("/cockpit")

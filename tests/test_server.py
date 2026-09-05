@@ -309,21 +309,41 @@ def test_api_leaderboard_covers_every_regime(client):
     assert regimes == {str(r) for r in Regime}
 
 
-def test_live_trading_is_the_main_screen(client):
+def test_the_fx_cockpit_is_the_main_screen(client):
     """
-    자동매매 앱을 켰는데 첫 화면이 백테스트면 지금 무슨 일이 일어나는지 알 수 없다.
-    본 화면은 엔진 상태·포지션이다.
+    앱을 켰는데 첫 화면이 백테스트면 지금 무슨 일이 일어나는지 알 수 없다.
+    본 화면은 **진행 중인 종목의 실시간 차트**와 계좌·포지션이다.
     """
     r = client.get("/")
     assert r.status_code == 200
-    assert "자동매매" in r.text
-    assert "포지션" in r.text and "리스크 가드" in r.text
+    assert "FX 상황판" in r.text
+    assert "포지션" in r.text
 
 
-def test_live_screen_warns_which_venue_it_is_pointed_at(client):
-    """테스트넷인지 실전인지 화면에서 바로 보이지 않으면 사고가 난다."""
-    r = client.get("/")
-    assert "테스트넷" in r.text and "실전" in r.text
+def test_the_main_screen_carries_a_live_tradingview_chart(client):
+    """
+    이 앱의 핵심 요구사항이다 — 지금 보고 있는 종목의 차트가 상황판에 떠 있어야 한다.
+    위젯 스크립트가 빠지면 화면은 열리지만 차트 자리가 비어 있고, 그건 이 앱의
+    존재 이유가 사라지는 것이다.
+    """
+    text = client.get("/").text
+    assert "s3.tradingview.com/tv.js" in text, "트레이딩뷰 위젯 스크립트가 없다"
+    assert "TradingView.widget" in text, "위젯을 만들지 않는다"
+
+
+def test_the_main_screen_says_the_two_price_feeds_differ(client):
+    """
+    차트는 트레이딩뷰(은행 간 집계), 체결은 MT5(브로커 호가)다. 몇 핍 어긋나는데
+    화면이 그걸 안 알려 주면 사용자는 버그로 오해한다.
+    """
+    text = client.get("/").text
+    assert "트레이딩뷰" in text and "MT5" in text
+
+
+def test_live_screen_warns_which_account_it_is_pointed_at(client):
+    """데모인지 실계좌인지 화면에서 바로 보이지 않으면 사고가 난다."""
+    text = client.get("/").text
+    assert "데모" in text and "실계좌" in text
 
 
 def test_review_screen_holds_the_backtest_tools(client):
