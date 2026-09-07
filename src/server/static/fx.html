@@ -621,6 +621,26 @@ async function engineCall(path) {
   finally { engineBusy = false; }
 }
 
+/* **루프가 실제로 도는지 보여 준다.**
+
+   예전에는 FX 쪽에 스케줄러가 아예 없어서 "시작"을 눌러도 아무 일이 없었다.
+   플래그만 켜져 있고 매매는 한 건도 나가지 않는데 화면은 "작동 중"이라고
+   말했다 — 고장 난 것처럼 보이지 않아서 더 나빴다. 그래서 확인 횟수와
+   마지막 기준 봉을 같이 내보낸다. running 인데 여기가 안 늘면 죽은 것이다. */
+function engineLoopRow(st) {
+  if (!st.running) return "";
+  const bad = !st.loop_alive;
+  const bar = st.last_bar ? st.last_bar.slice(11, 16) : "—";
+  return `
+    <div class="enginerow"><span class="k">루프</span>
+      <b style="color:${bad ? "var(--down)" : "var(--up)"}">${
+        bad ? "죽었음 — 다시 시작하세요" :
+        `살아있음 · ${st.poll_seconds}초마다 확인`}</b></div>
+    <div class="enginerow"><span class="k">한 바퀴</span>
+      <b>${st.cycles ?? 0}회 (확인 ${st.checks ?? 0}회)</b></div>
+    <div class="enginerow"><span class="k">기준 봉</span><b>${bar} UTC</b></div>`;
+}
+
 function renderEngine(st) {
   if (!st) return;
   const box = $("#engine");
@@ -642,6 +662,7 @@ function renderEngine(st) {
     <div class="enginerow"><span class="k">주문 대상</span>
       <b>${st.allow_live ? "실계좌 허용됨" : "데모 전용"}</b></div>
     <div class="enginerow"><span class="k">봉</span><b>${esc(st.interval || "")}</b></div>
+    ${engineLoopRow(st)}
     <div class="enginerow"><span class="k">감시 종목</span><b>${st.scanned ?? 0}</b></div>
     <div class="enginerow"><span class="k">오늘 실현</span>
       <b>${(g.realised_today ?? 0).toFixed(2)}</b></div>

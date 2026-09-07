@@ -69,6 +69,13 @@ WARMUP_BARS = 300
 _BARS_PER_DAY = {"1m": 1440, "5m": 288, "15m": 96, "30m": 48,
                  "1h": 24, "4h": 6, "1d": 1}
 
+# 새 봉이 떴는지 확인하는 주기(초). 봉 두 개만 받아 보는 값싼 호출이다.
+# **시계 계산으로 봉 마감을 맞추지 않는다.** MT5 는 서버 시간을 주고(GMT+2/+3,
+# 서머타임으로 바뀐다) 주말에는 장이 닫힌다. "다음 봉 마감까지 몇 초"를 계산하면
+# 그 셋을 다 맞춰야 하고 하나만 틀려도 같은 봉을 두 번 보거나 건너뛴다.
+# **새 봉이 실제로 나타났는지 보는 쪽**이 그 전부를 원천 회피한다.
+POLL_SECONDS = 30.0
+
 
 @dataclass
 class EngineState:
@@ -77,6 +84,12 @@ class EngineState:
     last_run: str | None = None
     last_error: str | None = None
     scanned: int = 0
+    # 루프가 실제로 돌고 있는지 화면이 알아야 한다. "시작"을 눌렀는데
+    # cycles 가 0 에서 안 늘면 뭔가 잘못된 것이다.
+    cycles: int = 0
+    checks: int = 0
+    last_bar: str | None = None
+    next_check: str | None = None
     signals: list[dict] = field(default_factory=list)
     opened: list[dict] = field(default_factory=list)
     closed: list[dict] = field(default_factory=list)
@@ -108,6 +121,8 @@ class FxTrader:
         self.state = EngineState()
         self._lock = threading.Lock()
         self._known: dict[str, dict] = {}
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
     # ─── 설정 ────────────────────────────────────────────────────
 
@@ -194,11 +209,13 @@ class FxTrader:
                                is_demo=acct.is_demo, interval=self.interval,
                                allow_live=self.allow_live,
                                verdict=VERDICT["headline"])
+            self._spawn()
             return self.status()
 
     def stop(self, reason: str = "사용자 정지") -> dict:
         with self._lock:
             self.state.running = False
+            self._stop.set()
             self.journal.write("engine", event="stop", reason=reason)
             return self.status()
 
@@ -209,6 +226,7 @@ class FxTrader:
         """
         self.guard.engage_kill(reason)
         self.state.running = False
+        self._stop.set()
         self.journal.write("engine", event="kill", reason=reason)
         return self.status()
 
@@ -223,6 +241,65 @@ class FxTrader:
         for row in out:
             self.journal.write("close", reason=reason, **row)
         return out
+
+    # ─── 루프 ────────────────────────────────────────────────────
+
+    def _spawn(self) -> None:
+        """루프 스레드를 띄운다. 이미 살아 있으면 두 번 띄우지 않는다."""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="fx-engine",
+                                        daemon=True)
+        self._thread.start()
+
+    def _newest_bar(self) -> str | None:
+        """
+        기준 종목의 **마지막 마감봉** 시각. 못 읽으면 None.
+
+        `bars()` 가 진행 중인 봉을 버리고 주므로, 이 값이 바뀌면 새 봉이
+        마감된 것이다. 별도의 settle 대기가 필요 없다.
+        """
+        pairs = self.watchlist()
+        if not pairs:
+            return None
+        df = bars(pairs[0].mt5, self.interval, 3)
+        if df.empty:
+            return None
+        return df.index[-1].isoformat()
+
+    def _loop(self) -> None:
+        """
+        새 봉이 마감될 때마다 한 바퀴 돈다.
+
+        **한 바퀴가 실패해도 루프는 죽지 않는다.** MT5 가 잠깐 끊기거나 한
+        종목이 말썽인 것으로 매매가 통째로 멈추면, 열린 포지션을 관리할
+        주체가 사라진다. 손절은 브로커에 걸려 있어 지켜지지만 목표가 이동이나
+        재평가가 멈춘다.
+
+        주말에는 새 봉이 안 뜨므로 조용히 아무것도 하지 않는다 — 오류를
+        장부에 쌓지 않는다.
+        """
+        while not self._stop.is_set():
+            try:
+                newest = self._newest_bar()
+                self.state.checks += 1
+                if newest and newest != self.state.last_bar:
+                    first = self.state.last_bar is None
+                    self.state.last_bar = newest
+                    # **처음 한 바퀴는 건너뛴다.** 시작 시점의 마지막 봉은
+                    # 이미 지나간 봉이고, 그걸로 진입하면 백테스트가 가정한
+                    # "봉 마감 직후 체결"보다 한참 늦은 가격에 들어간다.
+                    if not first:
+                        self.run_once()
+                        self.state.cycles += 1
+            except Exception as exc:
+                self.state.last_error = f"{type(exc).__name__}: {exc}"
+                self.journal.write("error", where="loop",
+                                   message=self.state.last_error)
+            self.state.next_check = datetime.now(timezone.utc).isoformat()
+            if self._stop.wait(POLL_SECONDS):
+                break
 
     # ─── 한 회 ───────────────────────────────────────────────────
 
@@ -414,6 +491,15 @@ class FxTrader:
             "last_run": self.state.last_run,
             "last_error": self.state.last_error,
             "scanned": self.state.scanned,
+            # **루프가 실제로 도는지 보여 준다.** running=True 인데 cycles 가
+            # 0 에서 안 늘면 스케줄러가 죽은 것이다 — 예전에는 스케줄러가
+            # 아예 없어서 "시작"을 눌러도 아무 일이 없었다.
+            "loop_alive": bool(self._thread and self._thread.is_alive()),
+            "cycles": self.state.cycles,
+            "checks": self.state.checks,
+            "last_bar": self.state.last_bar,
+            "next_check": self.state.next_check,
+            "poll_seconds": POLL_SECONDS,
             "signals": self.state.signals,
             "opened": self.state.opened,
             "closed": self.state.closed,
