@@ -17,6 +17,7 @@ MT5 는 신호 계산과 주문에만 쓴다. 다만 두 시세는 브로커가 
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -32,6 +33,100 @@ TIMEFRAMES = {
 
 _lock = threading.RLock()
 _initialised = False
+
+# ─── 브로커 서버 시간 ────────────────────────────────────────────
+#
+# **MT5 는 서버 시간을 UTC 에폭처럼 돌려준다.** 브로커가 GMT+2/+3 이면
+# `datetime.fromtimestamp(t.time, timezone.utc)` 가 실제보다 2~3시간 앞선
+# 시각을 만든다. 실측(XM, 2026-09-07): 실제 UTC 06:08 인데 틱이 09:08 로,
+# 가장 최근 거래가 **미래 시각**으로 찍혔다. 마감된 봉이 미래에 있는 셈이다.
+#
+# 그대로 두면 화면의 청산시각이 3시간 틀리고, 일일 손익 경계가 어긋나며,
+# 봉 마감에 맞춰 도는 스케줄러가 3시간 빗나간다.
+#
+# 오프셋을 직접 물어볼 방법은 없어서 **틱 시각과 실제 UTC 의 차이**로 잰다.
+# 브로커 오프셋은 항상 30분 배수이므로 격자에 붙이고, 격자에서 5분 이상
+# 벗어나면 시장이 닫혀 틱이 낡은 것으로 보고 **이전 값을 유지한다** —
+# 주말의 낡은 틱으로 오프셋을 갱신하면 엉뚱한 값이 박힌다.
+_GRID = 1800.0          # 오프셋 격자(초). 30분.
+_TOLERANCE = 300.0      # 격자에서 이만큼 벗어나면 낡은 틱으로 본다.
+_REFRESH = 1800.0       # 이 주기로 다시 잰다 (서머타임 전환 대응).
+_MAX_OFFSET = 14 * 3600.0   # 이 밖의 오프셋은 존재하지 않는다 = 낡은 틱이다.
+_offset: float | None = None
+_offset_at = 0.0
+# 바뀐 오프셋 후보 [값, 관측 횟수]. 두 번 연속 같아야 채택한다.
+_pending: list = []
+
+
+def server_offset(*, symbol: str = "EURUSD") -> float:
+    """
+    브로커 서버 시간 - 실제 UTC (초). 모르면 0.0.
+
+    한 번 알아낸 값은 캐시하고 30분마다 다시 잰다. 시장이 닫혀 있으면
+    갱신하지 않고 이전 값을 쓴다.
+    """
+    global _offset, _offset_at
+    now = time.time()
+    if _offset is not None and (now - _offset_at) < _REFRESH:
+        return _offset
+
+    try:
+        with _lock:
+            initialise()
+            mt5 = _mt5()
+            mt5.symbol_select(symbol, True)
+            t = mt5.symbol_info_tick(symbol)
+        if t is None:
+            return _offset or 0.0
+
+        raw = float(t.time) - time.time()
+        snapped = round(raw / _GRID) * _GRID
+        # 격자에서 많이 벗어나면 틱이 낡았다 — 갱신하지 않는다.
+        if abs(raw - snapped) > _TOLERANCE:
+            return _offset or 0.0
+        # 세상의 어떤 브로커도 UTC±14시간 밖에 있지 않다. 벗어나면 낡은 틱이다.
+        if abs(snapped) > _MAX_OFFSET:
+            return _offset or 0.0
+
+        _offset_at = now
+        if _offset is None:                # 처음이면 그대로 받는다
+            _offset = snapped
+            _pending[:] = [snapped, 1]
+            return _offset
+        if snapped == _offset:             # 그대로면 확인만 하고 끝
+            _pending[:] = [snapped, 1]
+            return _offset
+
+        # **바뀐 값은 두 번 연속 같아야 받는다.**
+        #
+        # 낡은 틱과 서머타임 전환을 구분하려면 이 방법밖에 없다. 처음엔
+        # "아는 오프셋으로 틱 나이를 재서 낡으면 무시"하게 했는데, 그러면
+        # 정상적인 전환(3시간→2시간)도 "1시간 낡은 틱"으로 보여 영원히
+        # 갱신되지 않았다(테스트가 잡았다).
+        #
+        # 시장이 닫혀 있으면 틱은 멈춰 있으므로 잰 오프셋이 잴 때마다
+        # 갱신 주기만큼 줄어든다 — 두 번 연속 같은 값이 나오지 않는다.
+        # 전환은 그 반대로 매번 같은 값이 나온다. 그래서 채택까지
+        # 갱신 주기 하나(30분)가 걸리고, 그 정도는 감수할 만하다.
+        if _pending and _pending[0] == snapped:
+            _offset = snapped
+            _pending[:] = [snapped, 2]
+        else:
+            _pending[:] = [snapped, 1]
+    except Exception:
+        return _offset or 0.0
+    return _offset
+
+
+def offset_known() -> bool:
+    """오프셋을 실제로 알아냈나. 모른 채 0 을 쓰고 있는지 화면이 알아야 한다."""
+    return _offset is not None
+
+
+def to_utc(server_epoch: float) -> datetime:
+    """MT5 가 준 시각을 **실제 UTC** 로 바꾼다."""
+    return datetime.fromtimestamp(float(server_epoch) - server_offset(),
+                                  timezone.utc)
 
 # 우리 주문임을 표시하는 번호와 태그 접두사. **거래 내역을 읽는 쪽과 주문을
 # 내는 쪽이 같은 값을 봐야 한다.** 양쪽에 따로 적어 두면 한쪽만 바뀌었을 때
@@ -200,7 +295,10 @@ def bars(symbol: str, interval: str = "1h", count: int = 1500) -> pd.DataFrame:
         raise MT5Error(f"{symbol} {interval} 데이터를 받지 못했습니다")
 
     df = pd.DataFrame(raw)
-    df["open_time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    # **서버 시간을 실제 UTC 로 옮긴다.** 안 옮기면 마감된 봉이 미래 시각으로
+    # 찍히고(실측 +3시간), 봉 마감에 맞춰 도는 스케줄러가 그만큼 빗나간다.
+    df["open_time"] = pd.to_datetime(
+        df["time"] - int(server_offset()), unit="s", utc=True)
     df = df.rename(columns={"tick_volume": "volume", "real_volume": "real_volume"})
     df = df.set_index("open_time")[["open", "high", "low", "close", "volume", "spread"]]
     # 마지막 봉은 아직 진행 중이다. 버린다.
@@ -220,7 +318,7 @@ def tick(symbol: str) -> dict[str, Any]:
             raise MT5Error(f"{symbol} 호가를 읽지 못했습니다")
         return {"symbol": symbol, "bid": t.bid, "ask": t.ask,
                 "spread": round(t.ask - t.bid, 8),
-                "at": datetime.fromtimestamp(t.time, timezone.utc).isoformat()}
+                "at": to_utc(t.time).isoformat()}
 
 
 def positions() -> dict[str, dict]:
@@ -243,7 +341,7 @@ def positions() -> dict[str, dict]:
             # magic 으로 우리가 연 포지션을 구분한다. 사람이 손으로 연 것을
             # 우리 것으로 착각해 청산하면 그건 사고다.
             "magic": getattr(p, "magic", 0),
-            "opened_at": datetime.fromtimestamp(p.time, timezone.utc).isoformat(),
+            "opened_at": to_utc(p.time).isoformat(),
             "comment": p.comment,
         }
     return out
@@ -297,7 +395,7 @@ def deals(days: int = 90) -> list[dict]:
                                         now + timedelta(days=1))
     out: list[dict] = []
     for d in (rows or []):
-        at = datetime.fromtimestamp(d.time, timezone.utc)
+        at = to_utc(d.time)
         if at < frm:
             continue
         out.append({
@@ -363,8 +461,8 @@ def closed_trades(days: int = 90, raw: list[dict] | None = None) -> list[dict]:
             "volume": round(sum(d["volume"] for d in ins), 4),
             "entry_price": _weighted(ins, "price"),
             "exit_price": _weighted(outs, "price"),
-            "opened_at": datetime.fromtimestamp(entry_at, timezone.utc).isoformat(),
-            "closed_at": datetime.fromtimestamp(exit_at, timezone.utc).isoformat(),
+            "opened_at": to_utc(entry_at).isoformat(),
+            "closed_at": to_utc(exit_at).isoformat(),
             "held_minutes": round((exit_at - entry_at) / 60, 1),
             "profit": round(net, 2),
             "gross": round(sum(d["profit"] for d in g), 2),

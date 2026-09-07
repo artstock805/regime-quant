@@ -405,3 +405,131 @@ def test_csv_only_ours_filters_rows(monkeypatch):
     ]
     body = _csv_of(monkeypatch, trades, only_ours=True).body.decode("utf-8-sig")
     assert "EUR/USD" in body and "GOLD" not in body
+
+
+# ─── 브로커 서버 시간 ────────────────────────────────────────────
+
+def test_server_time_is_converted_to_real_utc(monkeypatch):
+    """
+    **MT5 는 서버 시간을 UTC 에폭처럼 돌려준다.**
+
+    실측(XM, 2026-09-07): 실제 UTC 06:08 인데 틱이 09:08 로 왔고, 가장 최근
+    거래가 **미래 시각**으로 찍혔다 — 마감된 봉이 미래에 있는 셈이다.
+    그대로 두면 화면의 청산시각이 3시간 틀리고, 일일 손익 경계가 어긋나며,
+    봉 마감에 맞춰 도는 스케줄러가 그만큼 빗나간다.
+    """
+    monkeypatch.setattr(m, "_offset", 3 * 3600.0)
+    monkeypatch.setattr(m, "_offset_at", NOW.timestamp())
+    real = datetime(2026, 9, 7, 6, 0, tzinfo=timezone.utc)
+    server_epoch = real.timestamp() + 3 * 3600      # 브로커가 주는 값
+    assert m.to_utc(server_epoch) == real
+
+
+def test_a_stale_tick_does_not_overwrite_a_known_offset(monkeypatch):
+    """
+    주말에는 틱이 낡아 있다. 그걸로 오프셋을 갱신하면 엉뚱한 값이 박히고,
+    그 뒤 모든 시각이 조용히 틀린다.
+    """
+    monkeypatch.setattr(m, "_offset", 3 * 3600.0)
+    monkeypatch.setattr(m, "_offset_at", 0.0)       # 만료시켜 다시 재게 한다
+    monkeypatch.setattr(m, "initialise", lambda: True)
+    # 이틀 낡은 틱 — 격자(30분)에서 크게 벗어난다
+    stale = SimpleNamespace(time=NOW.timestamp() + 3 * 3600 - 47 * 3600)
+    monkeypatch.setattr(m, "_mt5", lambda: SimpleNamespace(
+        symbol_select=lambda *a: True, symbol_info_tick=lambda s: stale))
+    assert m.server_offset() == pytest.approx(3 * 3600.0)   # 이전 값 유지
+
+
+def test_a_daylight_saving_change_is_adopted_after_confirmation(monkeypatch):
+    """
+    서머타임 전환으로 오프셋이 바뀌면 따라가야 한다. 단 **두 번 연속 같은
+    값**이어야 받는다 — 낡은 틱과 전환을 구분하는 유일한 방법이다.
+    """
+    monkeypatch.setattr(m, "_offset", 3 * 3600.0)
+    monkeypatch.setattr(m, "_pending", [])
+    monkeypatch.setattr(m, "initialise", lambda: True)
+    import time as _t
+
+    def fresh_tick(_sym):
+        return SimpleNamespace(time=_t.time() + 2 * 3600 + 3)
+
+    monkeypatch.setattr(m, "_mt5", lambda: SimpleNamespace(
+        symbol_select=lambda *a: True, symbol_info_tick=fresh_tick))
+
+    m._offset_at = 0.0
+    assert m.server_offset() == pytest.approx(3 * 3600.0)   # 한 번은 안 받는다
+    m._offset_at = 0.0
+    assert m.server_offset() == pytest.approx(2 * 3600.0)   # 두 번째에 받는다
+
+
+def test_a_frozen_tick_never_confirms_because_it_keeps_drifting(monkeypatch):
+    """
+    시장이 닫히면 틱이 멈춘다 — 잴 때마다 오프셋이 갱신 주기만큼 줄어들어
+    두 번 연속 같은 값이 나오지 않는다. 그래서 채택되지 않는다.
+    """
+    monkeypatch.setattr(m, "_offset", 3 * 3600.0)
+    monkeypatch.setattr(m, "_pending", [])
+    monkeypatch.setattr(m, "initialise", lambda: True)
+    import time as _t
+    real_time = _t.time            # 패치 전에 잡아 둔다 (안 그러면 무한 재귀)
+    t0 = real_time()
+    frozen = t0 + 3 * 3600         # 장 마감 순간에 멈춘 틱
+
+    monkeypatch.setattr(m, "_mt5", lambda: SimpleNamespace(
+        symbol_select=lambda *a: True,
+        symbol_info_tick=lambda s: SimpleNamespace(time=frozen)))
+
+    for step in (1800, 3600, 5400):      # 30분씩 흐른다
+        monkeypatch.setattr(m.time, "time", lambda s=step: t0 + s)
+        m._offset_at = 0.0
+        m.server_offset()
+    assert m._offset == pytest.approx(3 * 3600.0)   # 끝까지 이전 값
+
+
+def test_offset_snaps_to_the_half_hour_grid(monkeypatch):
+    """
+    브로커 오프셋은 항상 30분 배수다. 격자에 붙이지 않으면 초 단위 지터가
+    시각에 그대로 실려 같은 봉이 미세하게 다른 라벨을 받는다.
+    """
+    monkeypatch.setattr(m, "_offset", None)
+    monkeypatch.setattr(m, "_offset_at", 0.0)
+    monkeypatch.setattr(m, "initialise", lambda: True)
+    import time as _t
+    jittered = SimpleNamespace(time=_t.time() + 3 * 3600 + 37)
+    monkeypatch.setattr(m, "_mt5", lambda: SimpleNamespace(
+        symbol_select=lambda *a: True, symbol_info_tick=lambda s: jittered))
+    assert m.server_offset() == pytest.approx(3 * 3600.0)
+
+
+def test_an_unknown_offset_is_reported_as_unknown(monkeypatch):
+    """
+    모른 채 0 을 쓰고 있는지 화면이 알아야 한다. 조용히 0 을 쓰면 시각이
+    틀린 줄도 모른다.
+    """
+    monkeypatch.setattr(m, "_offset", None)
+    monkeypatch.setattr(m, "_offset_at", 0.0)
+    monkeypatch.setattr(m, "initialise", lambda: True)
+    monkeypatch.setattr(m, "_mt5", lambda: SimpleNamespace(
+        symbol_select=lambda *a: True, symbol_info_tick=lambda s: None))
+    assert m.server_offset() == 0.0
+    assert m.offset_known() is False
+
+
+def test_closed_trade_times_use_the_converted_clock(fake_mt5, monkeypatch):
+    """
+    내역 화면의 청산시각이 3시간 밀려 있었다. 변환을 거치는지 잠근다.
+    """
+    monkeypatch.setattr(m, "_offset", 3 * 3600.0)
+    monkeypatch.setattr(m, "_offset_at", NOW.timestamp())
+    # MT5 가 주는 값을 흉내낸다 — 실제 시각 + 3시간(서버 시간).
+    entry = deal(1, entry=0, minutes_ago=120)
+    exit_ = deal(1, entry=1, kind=1, profit=1.0, minutes_ago=60)
+    entry.time += 3 * 3600
+    exit_.time += 3 * 3600
+    fake_mt5["deals"] = [entry, exit_]
+
+    t = m.closed_trades()[0]
+    closed = datetime.fromisoformat(t["closed_at"])
+    # 변환을 거치면 "실제 UTC 기준 60분 전"으로 돌아와야 한다.
+    drift = abs((NOW - closed).total_seconds() - 60 * 60)
+    assert drift < 120, f"변환이 안 됐다 (오차 {drift:.0f}초)"
