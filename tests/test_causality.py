@@ -143,7 +143,8 @@ def test_taker_indicators_skipped_when_column_absent():
 def test_registry_covers_every_category():
     from src.indicators import by_category
     cats = by_category()
-    assert set(cats) == {"trend", "momentum", "volatility", "volume", "derivatives"}, cats
+    assert set(cats) == {"trend", "momentum", "volatility", "volume",
+                         "derivatives", "orderflow"}, cats
     for cat, names in cats.items():
         assert len(names) >= 5, f"{cat} 카테고리에 지표가 {len(names)}개뿐입니다"
 

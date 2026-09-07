@@ -26,6 +26,9 @@ def make_candles(
     인과성 검사가 레지스트리 전체를 훑기 때문에, 이 열이 없으면 파생 지표 9종이
     검사에서 빠지는 게 아니라 입력 부족으로 **에러**가 난다. 기본을 True 로 둔 이유다.
     derivatives=False 는 '파생 데이터가 없을 때도 파이프라인이 도는가'를 볼 때 쓴다.
+
+    spread 도 같은 이유로 기본 포함이다 — MT5(FX) 봉에는 있고 암호화폐 봉에는
+    없는 열이라, 없을 때 건너뛰는지는 test_orderflow.py 에서 따로 본다.
     """
     idx = pd.date_range(start, periods=n, freq=interval, tz="UTC", name="open_time")
     rng = np.random.default_rng(seed)
@@ -40,6 +43,10 @@ def make_candles(
             "quote_volume": rng.uniform(100, 1000, n),
             "trades": rng.integers(10, 100, n),
             "taker_buy_base": rng.uniform(0.5, 5, n),
+            # FX(MT5) 봉에만 있는 열. 인과성 검사가 레지스트리 전체를 훑기
+            # 때문에 이게 없으면 spread_z 가 검사에서 빠지는 게 아니라 입력
+            # 부족으로 **에러**가 난다 (파생 열과 같은 이유).
+            "spread": rng.integers(15, 40, n).astype("float64"),
         },
         index=idx,
     )

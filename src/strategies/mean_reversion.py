@@ -156,3 +156,70 @@ class TrendExtensionFade(Strategy):
         conf = scale(score.abs(), p["entry"], 2.8)
         out["strength"] = latch(conf, long_state) + latch(conf, short_state)
         return out
+
+
+@register
+class OrderFlowFade(Strategy):
+    """
+    오더플로 쏠림 되돌림.
+
+    **재료가 진짜 오더플로가 아니라는 것을 먼저 안다.** 리테일 FX 에는 체결
+    방향·체결량·호가창이 없다 (XM 실측: real_volume 전봉 0, 호가창 제공 안 함,
+    틱의 last 와 volume 이 180일 전까지 100% 0). 그래서 `indicators/orderflow.py`
+    의 대용 지표를 쓴다 — 활동량(틱 카운트)에 봉 안 종가 위치로 방향을 준 것.
+
+    **왜 따라가지 않고 되돌리나.** 1시간봉 7개 통화쌍 실측 IC 가 전부 음수였다.
+
+        ofi_z      -0.054 평균 (7/7 통화쌍 음수)  ← 이 프로젝트 단일 특징 최고
+        cvd        -0.031 평균 (7/7 음수)
+        cvd_slope  -0.029 평균 (6/7 음수)
+
+    음의 IC 는 "쏠림이 클수록 다음 봉 수익률이 낮다"는 뜻이다. 즉 한쪽으로
+    쏠린 활동은 되돌아온다. 오더플로를 **추종**하는 전략을 짜면 이 부호와
+    반대로 거래하게 된다 — 이 프로젝트 초기에 돌파·모멘텀 3종이 그랬다.
+
+    새 정보인가
+        기존 특징과의 상관이 최대 0.25(bb_pct_b) 뿐이다. 기존 풀을 다시
+        표현한 것이 아니라 실제로 다른 것을 본다.
+
+    absorption 과 cvd_divergence 를 안 쓰는 이유
+        absorption 은 5/7 통화쌍만 부호가 맞았고(평균 -0.030), cvd_divergence
+        는 IC 가 +0.0005 로 사실상 0 이었다. 지표로는 등록해 뒀지만 이 전략의
+        방향 판단에는 넣지 않는다. 약한 것을 합성에 섞으면 잡음만 늘어난다.
+    """
+
+    name = "order_flow_fade"
+    korean = "오더플로 쏠림 되돌림"
+    # 같은 플로 계열인 flow_extension_fade 와 같은 국면을 선언한다. 어느 국면에
+    # 얼마나 무게를 줄지는 앙상블이 최근 실적으로 정한다.
+    regimes = (Regime.UPTREND, Regime.DOWNTREND, Regime.RANGE)
+    needs = ("ofi_z", "cvd", "cvd_slope")
+
+    @classmethod
+    def defaults(cls) -> dict:
+        return {"period": 200, "entry": 1.3, "exit_at": 0.2, "max_spread_z": 2.0}
+
+    def _signals(self, df, feats):
+        p = self.params
+        out = empty_signals(df.index)
+        score = _composite_z(feats, ["ofi_z", "cvd", "cvd_slope"], p["period"])
+
+        # **스프레드가 비정상적으로 벌어진 봉은 진입하지 않는다.**
+        #
+        # spread_z 자체의 IC 는 7/7 통화쌍에서 +0.051 로 강했지만 그것은
+        # 거래할 수 있는 우위가 아니다. 실측하니 스프레드 상위 5% 봉의 55/70 이
+        # 00시 UTC(일일 롤오버)에 몰려 있었고 그때 스프레드가 33 vs 평소 19 였다.
+        # 즉 "롤오버 봉 다음에 되돌아온다"는 기계적 인공물이고, 그걸 먹으려면
+        # 두 배 넓은 스프레드를 내고 들어가야 한다. 비용이 우위를 먹는 것은
+        # 이 프로젝트에서 이미 확인된 패턴이다(FX 평균 비용이 1R 의 10.9%).
+        # 그래서 신호로 쓰지 않고 문지기로만 쓴다.
+        if "spread_z" in feats.columns:
+            score = score.where(feats["spread_z"] <= p["max_spread_z"], 0.0)
+
+        long_state, short_state = _fade_state(score, p["entry"], p["exit_at"])
+        out.loc[long_state, "direction"] = 1.0
+        out.loc[short_state, "direction"] = -1.0
+
+        conf = scale(score.abs(), p["entry"], 2.8)
+        out["strength"] = latch(conf, long_state) + latch(conf, short_state)
+        return out

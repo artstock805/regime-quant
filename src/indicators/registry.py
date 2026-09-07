@@ -65,7 +65,9 @@ def _load_all() -> None:
     레지스트리를 먼저 채우면 나머지 카테고리를 건너뛰고, 지표가 소리 없이 사라진다.
     파이썬이 모듈을 캐시하므로 매번 불러도 @register 는 한 번만 실행된다.
     """
-    from . import derivatives, momentum, trend, volatility, volume  # noqa: F401
+    from . import (  # noqa: F401
+        derivatives, momentum, orderflow, trend, volatility, volume,
+    )
 
 
 def all_specs() -> dict[str, Spec]:
