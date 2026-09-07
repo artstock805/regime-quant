@@ -129,7 +129,9 @@ def measure(sym: str, t, interval: str, nbars: int) -> pd.DataFrame:
     sc["zero_share"] = round(zero_share, 3)
     sc["bars"] = len(df)
     sc["family"] = FAMILY.get(sym, "지수" if "Cash" in sym else "FX")
-    yrs = len(df) / (24 if interval == "1h" else 6) / 365
+    per_year = {"1h": 24 * 365, "4h": 6 * 365, "1d": 252}.get(
+        interval, 365)
+    yrs = len(df) / per_year
     print(f"  {sym} 완료 · {len(df)}봉({yrs:.1f}년) · "
           f"왕복 {cost_bp:.2f}bp(최근 {recent_bp:.2f}) · "
           f"spread=0 {zero_share:.0%}", flush=True)
