@@ -5,37 +5,33 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>호가창 현황판</title>
 <!--
-  실시간 호가창 — **브라우저가 바이낸스에 직접 붙는다.**
+  실시간 호가창 — **서버가 중계한다.** 이 페이지는 거래소에 직접 붙지 않는다.
 
-  왜 서버를 안 거치나
-      보기만 하는 용도라서다. 서버 중계는 여러 브라우저가 붙어도 거래소
-      연결이 하나로 유지되고 누적 델타를 전략에 재사용할 수 있다는 장점이
-      있지만, 그건 오더플로를 **거래에 쓸 때** 필요한 것이다. 눈으로만 볼
-      거라면 직접 붙는 쪽이 지연이 짧고 서버에 상태가 안 남는다.
-      전략에 먹이려면 그때 서버 중계로 바꿔야 한다.
+  왜 서버 중계인가
+      브라우저 직결(처음 방식)은 보기에는 충분했지만 두 가지를 못 했다.
+        · 탭을 닫으면 누적 델타가 사라진다.
+        · 전략이 그 데이터를 읽을 수 없다.
+      이제 서버(src/live/orderbook.py)가 거래소 연결을 하나 쥐고 호가창·
+      누적델타·**가격대별 풋프린트**를 쌓고, 이 화면은 200ms 마다 그 스냅샷을
+      받아 그리기만 한다.
+
+      그래서 달라진 것
+        · 새로고침해도 누적이 안 사라진다 (서버가 들고 있다)
+        · 탭을 여러 개 열어도 거래소 연결은 하나다
+        · 누적 초기화가 서버 호출이다 — 브라우저에서만 지우면 다른 탭과
+          엔진이 옛 누적을 계속 본다
+        · 엔진이 같은 상태를 읽을 수 있다 (/api/book/snapshot)
+
+      **거래소 프로토콜은 이 파일의 관심사가 아니다.** 스트림 이름, m 필드의
+      부호(공격자 방향), 눈금 추정은 전부 서버가 한다. 화면에서 그걸 다시
+      해석하면 두 곳이 어긋난다.
 
   왜 FX 상황판이 아니라 따로 있나
       **XM MT5 는 호가창을 아예 제공하지 않는다** (실측: EURUSD·USDJPY·
-      GOLD·US500Cash·BTCUSD 전부 market_book_add=False). 딜러 시장이라
-      브로커가 자기 호가 한 단만 준다. 그래서 여기 보이는 것은 전부
-      바이낸스 코인 호가창이고, /fx 가 MT5 로 거래하는 통화쌍과는 아무
-      관계가 없다. 같은 화면에 두면 그 둘을 섞어 읽게 된다.
-
-  스트림
-      <sym>@depth20@100ms   상위 20단 스냅샷. 차분(@depth)과 달리 시퀀스
-                            번호를 맞출 필요가 없어 표시용으로는 이쪽이 맞다.
-      <sym>@trade           체결 테이프. m=true 면 매수자가 메이커였다는
-                            뜻이므로 **공격자는 매도자**다. 이 부호를 뒤집으면
-                            델타가 정반대로 쌓인다.
-
-  왜 @aggTrade 가 아니라 @trade 인가
-      처음에 @aggTrade 로 만들었더니 10초에 0건이 왔다 (연결은 열려 있고
-      오류도 없었다). 같은 조건에서 @trade 는 93건, @bookTicker 716건,
-      @depth5 79건이 정상으로 왔고 REST 로 확인한 체결은 초당 여러 건이었다.
-      즉 데이터가 없는 게 아니라 그 스트림만 안 왔다.
-      @trade 는 체결을 하나씩 주므로 @aggTrade(같은 가격·방향을 묶은 것)보다
-      오히려 세밀하고, m 필드가 똑같이 있어 공격자 방향을 그대로 알 수 있다.
-      바꿔서 잃는 것이 없다.
+      GBPUSD·GOLD·US500Cash·BTCUSD 전부 market_book_add=False). 딜러 시장이라
+      브로커가 자기 호가 한 단만 준다. 그래서 여기 보이는 것은 전부 바이낸스
+      코인 호가창이고, /fx 가 MT5 로 거래하는 통화쌍과는 아무 관계가 없다.
+      같은 화면에 두면 그 둘을 섞어 읽게 된다.
 -->
 <style>
   :root{
@@ -73,6 +69,7 @@
   select,button{background:#1c222b;border:1px solid var(--line);color:var(--fg);
     border-radius:7px;padding:4px 9px;font-size:12px;font-family:inherit;
     cursor:pointer}
+  button:disabled{opacity:.4;cursor:default}
 
   .note{grid-area:note;padding:8px 14px;border-bottom:1px solid var(--line);
         background:#11161e;font-size:11.5px;color:var(--faint)}
@@ -116,6 +113,17 @@
   .tape div{display:flex;gap:8px;padding:2px 0;border-bottom:1px solid #1a212b}
   .tape .t{color:var(--faint);flex:none;width:62px}
   .tape .q{margin-left:auto}
+  .foot{max-height:300px;overflow-y:auto;font-size:11px;
+        font-variant-numeric:tabular-nums}
+  .foot table{width:100%;border-collapse:collapse}
+  .foot th{color:var(--faint);font-weight:600;text-align:right;padding:3px 5px;
+           position:sticky;top:0;background:var(--panel2);font-size:10px}
+  .foot th:first-child{text-align:left}
+  .foot td{padding:2px 5px;text-align:right;border-bottom:1px solid #1a212b;
+           position:relative}
+  .foot td:first-child{text-align:left;font-weight:700}
+  .foot .dbar{position:absolute;top:1px;bottom:1px;z-index:0;border-radius:2px}
+  .foot td span{position:relative;z-index:1}
   .empty{color:var(--faint);font-size:12px;padding:6px 0}
   .imb{height:8px;border-radius:4px;background:var(--down);overflow:hidden;
        margin:6px 0 2px}
@@ -145,13 +153,14 @@
   </div>
 
   <div class="note">
-    바이낸스 USDⓈ-M 선물 · 호가 20단 100ms · 체결 테이프 —
+    바이낸스 USDⓈ-M 선물 · 호가 20단 100ms · 체결 테이프 · 가격대별 풋프린트 —
     <b>보이는 20단이 전부가 아닙니다.</b> 그 밖의 큰 대기 주문은 안 보이고,
     코인 호가창에는 스푸핑·레이어링이 흔해서 화면의 깊이가 실제로 체결될
     물량이라는 보장이 없습니다.
     <b>MT5(XM)는 호가창을 제공하지 않아</b> /fx 의 통화쌍은 여기 띄울 수 없습니다 —
     이 화면은 코인 전용이고 FX 거래와 무관합니다.
-    누적 델타는 <b>이 탭을 연 뒤부터</b>만 셉니다(새로고침하면 0).
+    누적은 <b>서버가</b> 쌓으므로 새로고침해도 이어집니다 — 지우려면 초기화를
+    누르세요(엔진이 보는 값도 같이 지워집니다).
   </div>
 
   <div class="book">
@@ -175,6 +184,11 @@
     </div>
 
     <div class="card">
+      <h3>풋프린트 (가격대별 델타)</h3>
+      <div class="foot" id="foot"><div class="empty">쌓이는 중…</div></div>
+    </div>
+
+    <div class="card">
       <h3>체결 테이프</h3>
       <div class="tape" id="tape"><div class="empty">체결을 기다리는 중…</div></div>
     </div>
@@ -186,28 +200,32 @@
 "use strict";
 const $ = s => document.querySelector(s);
 
-const LEVELS = 20;
-let ws = null, sym = "btcusdt";
-let book = {bids: [], asks: []};
-let tape = [];                 // 최근 체결 (최신이 앞)
-let cvd = 0, buyVol = 0, sellVol = 0, nTrades = 0;
-let dirty = false;
+/* 서버가 상태를 들고 있으므로 이 파일에는 누적이 없다. 받은 스냅샷을 그대로
+   그린다. 거래소 프로토콜(스트림 이름·m 필드 부호·눈금 추정)은 전부 서버 쪽
+   관심사다 — 화면에서 그걸 다시 해석하면 두 곳이 어긋난다. */
+let ws = null, snap = null, sym = "btcusdt", dirty = false;
 
 function fmtPx(v) {
   const n = +v;
-  // 코인마다 자릿수가 다르다 (BTC 는 1자리, DOGE 는 5자리). 값 크기로 정한다.
   const d = n >= 1000 ? 1 : n >= 10 ? 2 : n >= 1 ? 4 : 6;
   return n.toFixed(d);
 }
 function fmtQty(v) {
   const n = +v;
-  return n >= 1000 ? n.toFixed(0) : n >= 1 ? n.toFixed(2) : n.toFixed(4);
+  return Math.abs(n) >= 1000 ? n.toFixed(0)
+       : Math.abs(n) >= 1 ? n.toFixed(2) : n.toFixed(4);
 }
 function fmtUsd(v) {
   const n = +v;
   if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
   if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
   return n.toFixed(0);
+}
+function fmtUptime(s) {
+  s = Math.max(0, Math.round(s ?? 0));
+  if (s < 60) return s + "초";
+  if (s < 3600) return Math.floor(s / 60) + "분 " + (s % 60) + "초";
+  return Math.floor(s / 3600) + "시간 " + Math.floor((s % 3600) / 60) + "분";
 }
 
 function setConn(state, text) {
@@ -216,23 +234,21 @@ function setConn(state, text) {
   c.className = "chip " + state;
 }
 
-/* ── 호가 사다리 ─────────────────────────────────────────────────
-   매도(asks)를 위에 역순으로, 매수(bids)를 아래에 놓는다. 실제 호가창과
-   같은 배치라 눈이 익숙하고, 가운데가 현재가가 된다. */
+/* ── 호가 사다리 ───────────────────────────────────────────────── */
 function renderBook() {
-  const asks = book.asks.slice(0, LEVELS);
-  const bids = book.bids.slice(0, LEVELS);
+  const asks = snap && snap.asks ? snap.asks : [];
+  const bids = snap && snap.bids ? snap.bids : [];
   if (!asks.length || !bids.length) return;
 
-  // 막대 길이는 양쪽을 합친 최대 수량으로 정규화한다. 한쪽만으로 정규화하면
-  // 매수·매도 막대가 서로 다른 축을 쓰게 되어 크기 비교가 거짓이 된다.
+  // 막대는 **양쪽을 합친 최대 수량**으로 정규화한다. 한쪽만으로 하면 매수·매도
+  // 막대가 서로 다른 축을 쓰게 되어 크기 비교가 거짓이 된다.
   const maxQ = Math.max(...asks.map(l => +l[1]), ...bids.map(l => +l[1])) || 1;
 
   let cum = 0;
-  const askRows = asks.map(l => {           // 누적은 안쪽(중앙)부터 쌓는다
+  const askRows = asks.map(l => {          // 누적은 안쪽(중앙)부터 쌓는다
     cum += +l[1];
     return {px: +l[0], qty: +l[1], cum};
-  }).reverse();                             // 화면에는 높은 가격이 위
+  }).reverse();                            // 화면에는 높은 가격이 위
 
   cum = 0;
   const bidRows = bids.map(l => {
@@ -270,6 +286,14 @@ function renderStats(bestBid, bestAsk, bidRows, askRows) {
   const total = bidDepth + askDepth;
   const bidShare = total ? bidDepth / total : 0.5;
   const mid = (bestBid + bestAsk) / 2;
+  const cvd = snap.cvd ?? 0;
+
+  // **끊긴 것을 조용히 넘기면 안 된다.** 화면은 마지막 호가를 그대로 들고
+  // 있어서 살아 있는 것처럼 보인다. 지연이 길어지면 그렇게 말한다.
+  const stale = snap.stale_s;
+  const staleWarn = (stale != null && stale > 3)
+    ? `<div class="kv"><span style="color:var(--down)">데이터 지연</span>
+         <span class="neg">${stale.toFixed(1)}초</span></div>` : "";
 
   $("#stats").innerHTML = `
     <div class="kv"><span>중간가</span><span>${fmtPx(mid)}</span></div>
@@ -280,88 +304,126 @@ function renderStats(bestBid, bestAsk, bidRows, askRows) {
     <div class="imb"><i style="width:${(bidShare * 100).toFixed(1)}%"></i></div>
     <div class="sub">매수 ${(bidShare * 100).toFixed(1)}% ·
       매도 ${((1 - bidShare) * 100).toFixed(1)}% (20단 한정)</div>
+    ${staleWarn}
     <div class="kv" style="margin-top:8px"><span>누적 델타</span><span class="${
       cvd >= 0 ? "pos" : "neg"}">${cvd >= 0 ? "+" : ""}${fmtQty(cvd)}</span></div>
-    <div class="kv"><span>공격 매수</span><span class="pos">${fmtQty(buyVol)}</span></div>
-    <div class="kv"><span>공격 매도</span><span class="neg">${fmtQty(sellVol)}</span></div>
-    <div class="kv"><span>체결 수</span><span>${nTrades.toLocaleString()}</span></div>
-    <div class="sub">이 탭을 연 뒤부터만 셉니다</div>`;
+    <div class="kv"><span>공격 매수</span><span class="pos">${
+      fmtQty(snap.buy_vol)}</span></div>
+    <div class="kv"><span>공격 매도</span><span class="neg">${
+      fmtQty(snap.sell_vol)}</span></div>
+    <div class="kv"><span>체결 수</span><span>${
+      (snap.n_trades ?? 0).toLocaleString()}</span></div>
+    <div class="kv"><span>호가 눈금</span><span>${snap.tick ?? "—"}</span></div>
+    <div class="sub">서버가 ${fmtUptime(snap.uptime_s)} 동안 쌓은 값 ·
+      재연결 ${snap.reconnects ?? 0}회</div>`;
 }
 
+/* ── 풋프린트 ──────────────────────────────────────────────────
+   **이것이 봉으로 뭉개면 사라지는 구조다.** 같은 가격 눈금에서 공격 매수와
+   공격 매도를 따로 세면 어느 레벨에서 물량이 흡수됐는지가 보인다. 봉 단위로
+   합산한 테이커 불균형에 우위가 없었던 이유가 여기에 있을 수 있다. */
+function renderFoot() {
+  const rows = (snap && snap.footprint) ? snap.footprint : [];
+  if (!rows.length) {
+    $("#foot").innerHTML = '<div class="empty">쌓이는 중…</div>';
+    return;
+  }
+  const maxAbs = Math.max(...rows.map(r => Math.abs(r.delta))) || 1;
+  $("#foot").innerHTML = `<table>
+    <thead><tr><th>가격</th><th>매수</th><th>매도</th><th>델타</th></tr></thead>
+    <tbody>${rows.map(r => {
+      const w = (Math.abs(r.delta) / maxAbs * 100).toFixed(1);
+      const pos = r.delta >= 0;
+      return `<tr>
+        <td><span>${fmtPx(r.px)}</span></td>
+        <td><span class="pos">${fmtQty(r.buy)}</span></td>
+        <td><span class="neg">${fmtQty(r.sell)}</span></td>
+        <td><div class="dbar" style="${pos ? "right" : "left"}:0;width:${w}%;
+              background:${pos ? "var(--bidbar)" : "var(--askbar)"}"></div>
+            <span class="${pos ? "pos" : "neg"}">${
+              pos ? "+" : ""}${fmtQty(r.delta)}</span></td>
+      </tr>`;
+    }).join("")}</tbody></table>
+    <div class="sub">현재가 근처 ${rows.length}칸 (서버 보유 ${
+      snap.footprint_levels ?? 0}칸)</div>`;
+}
+
+/* ── 체결 테이프 ───────────────────────────────────────────────── */
 function renderTape() {
-  if (!tape.length) return;
-  $("#tape").innerHTML = tape.slice(0, 60).map(t => `
-    <div>
-      <span class="t">${t.at}</span>
+  const rows = (snap && snap.tape) ? snap.tape : [];
+  if (!rows.length) return;
+  $("#tape").innerHTML = rows.map(t => {
+    const at = new Date(t.at);
+    return `<div>
+      <span class="t">${at.toTimeString().slice(0, 8)}</span>
       <span class="${t.buy ? "pos" : "neg"}">${t.buy ? "매수" : "매도"}</span>
       <span>${fmtPx(t.px)}</span>
       <span class="q">${fmtQty(t.qty)}</span>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 }
 
-/* 100ms 마다 DOM 을 다시 만들면 브라우저가 못 따라간다.
-   프레임에 한 번만 그린다. */
+/* 스냅샷은 200ms 로 오지만 프레임에 한 번만 그린다. */
 function tick() {
-  if (dirty) { renderBook(); renderTape(); dirty = false; }
+  if (dirty) { renderBook(); renderFoot(); renderTape(); dirty = false; }
   requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
 
 function connect() {
   if (ws) { ws.onclose = null; ws.close(); }
-  book = {bids: [], asks: []};
-  tape = [];
-  $("#lad").innerHTML =
-    '<tr><td colspan="4"><div class="empty">호가를 기다리는 중…</div></td></tr>';
+  setConn("", "서버 연결 중…");
+  const proto = location.protocol === "https:" ? "wss://" : "ws://";
+  ws = new WebSocket(`${proto}${location.host}/ws/book?symbol=${sym}`);
 
-  const streams = `${sym}@depth${LEVELS}@100ms/${sym}@trade`;
-  setConn("", "연결 중…");
-  ws = new WebSocket(`wss://fstream.binance.com/stream?streams=${streams}`);
-
-  ws.onopen = () => setConn("on", "연결됨 · " + sym.toUpperCase());
+  ws.onopen = () => setConn("on", "중계 연결됨");
   ws.onclose = () => {
-    setConn("off", "끊김 — 5초 후 재연결");
-    setTimeout(() => { if (ws && ws.readyState === WebSocket.CLOSED) connect(); }, 5000);
+    setConn("off", "서버 끊김 — 5초 후 재연결");
+    setTimeout(() => { if (ws && ws.readyState === WebSocket.CLOSED) connect(); },
+               5000);
   };
-  ws.onerror = () => setConn("off", "연결 오류");
+  ws.onerror = () => setConn("off", "서버 연결 오류");
 
   ws.onmessage = ev => {
-    let msg;
-    try { msg = JSON.parse(ev.data); } catch (e) { return; }
-    const d = msg.data;
-    if (!d) return;
-
-    // **분기는 반드시 d.e 로 한다.** 필드 존재로 판단하면 체결 메시지의
-    // a(집계 체결 ID)를 호가 배열로 오인해 book.asks 에 숫자가 들어간다.
-    if (d.e === "depthUpdate") {
-      // 부분 호가창 스냅샷이라 그대로 갈아 끼우면 된다 (차분 병합 불필요)
-      if (Array.isArray(d.b)) book.bids = d.b;
-      if (Array.isArray(d.a)) book.asks = d.a;
-      dirty = true;
-    } else if (d.e === "trade") {
-      // **m=true 는 "매수자가 메이커"다 → 공격자는 매도자.**
-      // 이 부호를 뒤집으면 델타가 정반대로 쌓인다.
-      const buy = d.m === false;
-      const qty = +d.q;
-      cvd += buy ? qty : -qty;
-      if (buy) buyVol += qty; else sellVol += qty;
-      nTrades++;
-      const t = new Date(d.T);
-      tape.unshift({
-        at: t.toTimeString().slice(0, 8), px: +d.p, qty, buy,
-      });
-      if (tape.length > 200) tape.length = 200;
-      dirty = true;
-    }
+    let m;
+    try { m = JSON.parse(ev.data); } catch (e) { return; }
+    if (m.type === "error") { setConn("off", m.message || "오류"); return; }
+    if (m.type !== "snapshot") return;
+    snap = m;
+    dirty = true;
+    // **서버가 끊긴 것과 거래소가 끊긴 것은 다른 상태다.** 구분해서 말한다 —
+    // 서버는 붙어 있는데 거래소가 끊겼으면 화면은 옛 호가를 들고 있다.
+    setConn(m.connected ? "on" : "off",
+            m.connected ? `중계 · ${String(m.symbol).toUpperCase()}`
+                        : `거래소 끊김 (재연결 ${m.reconnects}회)`);
   };
 }
 
-$("#sym").onchange = e => { sym = e.target.value; resetCounters(); connect(); };
-$("#reset").onclick = resetCounters;
+$("#sym").onchange = e => {
+  sym = e.target.value;
+  snap = null;
+  $("#lad").innerHTML =
+    '<tr><td colspan="4"><div class="empty">호가를 기다리는 중…</div></td></tr>';
+  $("#foot").innerHTML = '<div class="empty">쌓이는 중…</div>';
+  $("#tape").innerHTML = '<div class="empty">체결을 기다리는 중…</div>';
+  // 연결을 다시 맺지 않고 서버에 종목만 바꿔 달라고 한다.
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({cmd: "symbol", symbol: sym}));
+  } else {
+    connect();
+  }
+};
 
-function resetCounters() {
-  cvd = 0; buyVol = 0; sellVol = 0; nTrades = 0; dirty = true;
-}
+/* **초기화는 서버 호출이다.** 브라우저에서만 지우면 다른 탭과 엔진이 옛
+   누적을 계속 본다. */
+$("#reset").onclick = async () => {
+  const btn = $("#reset");
+  btn.disabled = true;
+  try {
+    await fetch(`/api/book/reset?symbol=${sym}`, {method: "POST"});
+  } catch (e) { /* 다음 스냅샷에서 어차피 드러난다 */ }
+  btn.disabled = false;
+};
 
 connect();
 </script>

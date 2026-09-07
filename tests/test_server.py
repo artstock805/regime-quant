@@ -499,7 +499,7 @@ def test_order_book_page_is_served_and_is_crypto_only(client):
     실시간 호가창 페이지.
 
     **/fx 와 반드시 분리돼 있어야 한다.** XM MT5 는 호가창을 아예 제공하지
-    않는다 (실측: EURUSD·USDJPY·GOLD·US500Cash·BTCUSD 전부
+    않는다 (실측: EURUSD·USDJPY·GBPUSD·GOLD·US500Cash·BTCUSD 전부
     market_book_add=False). 그래서 이 화면은 바이낸스 코인 호가창이고 /fx 가
     거래하는 통화쌍과 무관하다. 같은 화면에 두면 사람이 그 둘을 섞어 읽는다.
     그 경고가 화면에 남아 있는지까지 본다.
@@ -509,16 +509,52 @@ def test_order_book_page_is_served_and_is_crypto_only(client):
     text = r.text
     assert "호가창 현황판" in text
 
-    # 브라우저가 거래소에 직접 붙는다 (서버 중계 아님)
-    assert "wss://fstream.binance.com" in text
-
-    # @aggTrade 는 이 환경에서 10초에 0건이 왔다. @trade 로 바꿨고 되돌리면 안 된다.
-    assert "@trade" in text and "@aggTrade" not in text.split("-->")[1]
-
     # 사람을 속이지 않기 위한 문구들
     assert "20단이 전부가 아닙니다" in text        # 보이는 깊이가 전부가 아니다
-    assert "스푸핑" in text                        # 화면 깊이 ≠ 체결될 물량
+    assert "스푸핑" in text                        # 화면 깊이 != 체결될 물량
     assert "호가창을 제공하지 않아" in text        # FX 는 여기 띄울 수 없다
+
+
+def test_the_page_talks_to_our_relay_not_to_the_exchange(client):
+    """
+    **서버 중계다.** 브라우저가 거래소에 직결하면 탭을 닫으면 누적이 사라지고
+    전략이 그 데이터를 못 읽는다.
+
+    거래소 주소가 화면 코드에 남아 있으면 누군가 다시 직결로 되돌린 것이다.
+    스트림 이름·m 필드 부호·눈금 추정은 전부 서버 관심사이므로 화면에는
+    나타나지 않아야 한다 — 두 곳에서 해석하면 언젠가 어긋난다.
+    """
+    text = client.get("/book").text
+    assert "/ws/book" in text                      # 우리 서버로 붙는다
+    assert "fstream.binance.com" not in text       # 거래소로 직결하지 않는다
+    assert "@depth" not in text and "@trade" not in text
+
+    # 누적이 서버에 있으므로 초기화도 서버 호출이어야 한다. 브라우저에서만
+    # 지우면 다른 탭과 엔진이 옛 누적을 계속 본다.
+    assert "/api/book/reset" in text
+
+
+def test_relay_endpoints_exist(client):
+    """엔진이 같은 상태를 읽는 경로와, 잊힌 연결을 보는 경로."""
+    paths = {r.path for r in client.app.routes if hasattr(r, "path")}
+    assert {"/api/book/snapshot", "/api/book/status",
+            "/api/book/reset", "/api/book/stop", "/ws/book"} <= paths
+
+
+def test_an_unknown_symbol_is_refused_by_the_api(client):
+    """
+    종목 문자열이 그대로 거래소 URL 에 들어가면 남이 임의의 스트림을 열게
+    만들 수 있고, 오타 하나로 조용히 빈 화면이 된다.
+    """
+    r = client.get("/api/book/snapshot?symbol=notacoin")
+    assert r.status_code == 400
+    assert "모르는 종목" in r.json()["detail"]
+
+
+def test_reset_on_a_stream_that_is_not_running_says_so(client):
+    """조용히 성공했다고 말하면 사용자가 지워졌다고 믿는다."""
+    r = client.post("/api/book/reset?symbol=adausdt")
+    assert r.status_code == 404
 
 
 def test_order_book_page_does_not_leak_into_the_fx_dashboard(client):
@@ -528,3 +564,4 @@ def test_order_book_page_does_not_leak_into_the_fx_dashboard(client):
     """
     fx = client.get("/fx").text
     assert "fstream.binance.com" not in fx
+    assert "/ws/book" not in fx

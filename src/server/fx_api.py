@@ -79,22 +79,6 @@ def fx_page() -> FileResponse:
     return FileResponse(STATIC / "fx.html", headers=NO_CACHE)
 
 
-@router.get("/book")
-def book_page() -> FileResponse:
-    """
-    실시간 호가창. **코인 전용이고 /fx 와 별개다.**
-
-    XM MT5 는 호가창을 아예 제공하지 않는다 (실측: EURUSD·USDJPY·GOLD·
-    US500Cash·BTCUSD 전부 market_book_add=False). 딜러 시장이라 브로커가
-    자기 호가 한 단만 준다. 그래서 이 화면은 바이낸스 코인 호가창이고,
-    /fx 가 거래하는 통화쌍과는 아무 관계가 없다 — 같은 화면에 두면 그 둘을
-    섞어 읽게 되므로 따로 뒀다.
-
-    브라우저가 거래소에 직접 붙는다. 서버는 파일만 준다.
-    """
-    return FileResponse(STATIC / "book.html", headers=NO_CACHE)
-
-
 @router.get("/api/fx/status")
 def fx_status() -> dict[str, Any]:
     st = mt5_status()
