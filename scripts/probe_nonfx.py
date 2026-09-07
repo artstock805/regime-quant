@@ -56,30 +56,64 @@ DEFAULT = ("GOLD", "US100Cash", "JP225Cash", "XAUEUR", "XAUJPY",
            "GER40Cash", "US500Cash", "US30Cash", "FRA40Cash",
            "OILCash", "BRENTCash", "SILVER")
 
+# 비교군. **같은 조건에서 나란히 재야** "비용이 싼 쪽이 정말 나은가"를 말할 수
+# 있다. 따로 잰 숫자를 나중에 나란히 놓으면 봉 수도 기간도 달라 비교가 안 된다.
+FX_GROUP = ("EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF",
+            "NZDUSD")
 
-def half_spread(df: pd.DataFrame, si) -> float:
+# 종목 성격별로 묶어 본다. 금·지수·에너지가 다르게 나오면 그 자체가 정보다.
+FAMILY = {
+    "GOLD": "금", "XAUEUR": "금", "XAUJPY": "금", "SILVER": "은",
+    "OILCash": "에너지", "BRENTCash": "에너지",
+}
+
+
+def half_spread(df: pd.DataFrame, si) -> tuple[float, float, float]:
     """
-    편도 비용(비율). 엔진이 쓰는 것과 같은 방식 — 봉마다 저장된 그때의
-    스프레드를 쓴다. 지금 호가창의 스프레드를 쓰면 휴장 중에 0 이 나온다.
+    편도 비용(비율)과 진단값. (편도, 전체0제외bp, 최근bp) 를 돌려준다.
+
+    **spread==0 인 봉을 반드시 빼야 한다.** MT5 옛 이력에는 스프레드가 기록돼
+    있지 않고 0 으로 온다. 그건 "비용 없음"이 아니라 **"모름"** 이다. 안 빼면
+    중위값이 0 이 되어 비용을 공짜로 넣게 된다.
+
+    실측(4시간봉 17,000봉): OILCash 68.0% · BRENTCash 60.9% ·
+    GER40Cash 55.5% · XAUEUR 61.0% 가 0 이었다. 그 탓에 앞선 측정에서
+    "에너지가 유일하게 기대R 양수(+0.028)" 라는 **거짓 결과**가 나왔다 —
+    실제 비용은 4~5bp 다. GOLD·EURUSD·SILVER 는 0 이 0.1% 미만이라 무사했다.
+
+    전 구간에 하나의 비용을 적용하는 구조이므로 **0 을 뺀 전 구간 중위**를
+    쓴다. 최근 구간이 더 싼 종목도 있지만(SILVER 15.1→7.8bp) 그쪽을 쓰면
+    과거 수익에 오늘 비용을 붙이는 셈이라 결과가 유리해진다.
     """
     if "spread" not in df.columns:
-        return 0.0
+        return 0.0, 0.0, 0.0
     rel = (df["spread"] * si.point / df["close"]).replace(
-        [np.inf, -np.inf], np.nan).dropna()
-    return float(rel.median()) / 2.0 if len(rel) else 0.0
+        [np.inf, -np.inf], np.nan)
+    nz = rel[(df["spread"] > 0) & rel.notna()]
+    if not len(nz):
+        return 0.0, 0.0, 0.0
+    full = float(nz.median())
+    tail = nz.tail(2000)
+    recent = float(tail.median()) if len(tail) else full
+    return full / 2.0, full * 1e4, recent * 1e4
 
 
-def measure(sym: str, t, months: int) -> pd.DataFrame:
-    df = bars(sym, "1h", 6000)
+def measure(sym: str, t, interval: str, nbars: int) -> pd.DataFrame:
+    df = bars(sym, interval, nbars)
     if len(df) < 1500:
         print(f"  {sym} 이력 부족 ({len(df)}봉)", flush=True)
         return pd.DataFrame()
     feats = compute_all(df)
     si = symbol_info(sym)
-    half = half_spread(df, si)
+    half, cost_bp, recent_bp = half_spread(df, si)
+    if half <= 0:
+        print(f"  {sym} 스프레드 기록이 없어 비용을 알 수 없다 — 건너뜀",
+              flush=True)
+        return pd.DataFrame()
+    zero_share = float((df["spread"] == 0).mean())
     regs = classify(feats)["regime"]
 
-    res = run_standalone(df, feats, t.strategies(), interval="1h",
+    res = run_standalone(df, feats, t.strategies(), interval=interval,
                          costs=Costs(fee_rate=half, slippage_bps=0.5),
                          params=ExecParams(), initial_equity=10_000,
                          minute_df=None, regimes=regs, symbol=sym)
@@ -90,26 +124,41 @@ def measure(sym: str, t, months: int) -> pd.DataFrame:
     sc = score_by_regime(pd.concat(frames, ignore_index=True),
                          t.weight_params())
     sc["symbol"] = sym
-    sc["cost_bp"] = round(half * 2 * 1e4, 2)
+    sc["cost_bp"] = round(cost_bp, 2)
+    sc["recent_bp"] = round(recent_bp, 2)
+    sc["zero_share"] = round(zero_share, 3)
     sc["bars"] = len(df)
-    print(f"  {sym} 완료 · {len(df)}봉 · 왕복 {half*2*1e4:.1f}bp", flush=True)
+    sc["family"] = FAMILY.get(sym, "지수" if "Cash" in sym else "FX")
+    yrs = len(df) / (24 if interval == "1h" else 6) / 365
+    print(f"  {sym} 완료 · {len(df)}봉({yrs:.1f}년) · "
+          f"왕복 {cost_bp:.2f}bp(최근 {recent_bp:.2f}) · "
+          f"spread=0 {zero_share:.0%}", flush=True)
     return sc
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols", default=",".join(DEFAULT))
-    ap.add_argument("--months", type=int, default=8)
+    ap.add_argument("--interval", default="1h")
+    # MT5 는 요청하면 서버에서 더 받아온다. 6000 만 요청했다가 "이력이 250일뿐"
+    # 이라고 잘못 결론 낸 적이 있다 — 1시간봉 2.3년, 4시간봉 7.9년이 나온다.
+    ap.add_argument("--bars", type=int, default=20000)
+    ap.add_argument("--with-fx", action="store_true",
+                    help="FX 메이저를 같은 조건에서 같이 재서 비교한다")
     args = ap.parse_args()
 
     t = trader()
     wp = t.weight_params()
     declared = {s.name: {str(r) for r in s.regimes} for s in t.strategies()}
 
+    names = [x.strip() for x in args.symbols.split(",") if x.strip()]
+    if args.with_fx:
+        names += list(FX_GROUP)
+
     frames = []
-    for sym in args.symbols.split(","):
+    for sym in names:
         try:
-            r = measure(sym.strip(), t, args.months)
+            r = measure(sym, t, args.interval, args.bars)
             if not r.empty:
                 frames.append(r)
         except Exception as exc:
@@ -148,6 +197,17 @@ def main() -> int:
     else:
         print(ok[cols].round(4).to_string(index=False))
 
+    print("\n── 성격별 (비교가 요점이다) ──")
+    fam = all_.groupby("family").agg(
+        종목=("symbol", "nunique"), 칸=("strategy", "count"),
+        자격=("eligible", "sum"), 거래=("trades", "sum"),
+        기대R평균=("expectancy_r", "mean"),
+        기대R중위=("expectancy_r", "median"),
+        양수비율=("expectancy_r", lambda x: (x > 0).mean()),
+        비용bp=("cost_bp", "mean"), 최근bp=("recent_bp", "mean"))
+    fam["자격비율"] = (fam["자격"] / fam["칸"]).round(3)
+    print(fam.sort_values("기대R평균", ascending=False).round(4).to_string())
+
     print("\n── 국면별 (전 종목) ──────────────────────────────")
     r = all_.groupby("regime").agg(
         칸=("strategy", "count"), 자격=("eligible", "sum"),
@@ -160,8 +220,8 @@ def main() -> int:
           f"({(tot>0).mean():.0%}) · 자격 {int(all_['eligible'].sum())}칸")
     print(f"기대R 평균 {tot.mean():+.4f} · 중위 {tot.median():+.4f}")
     print()
-    print("비교: FX 7개 통화쌍에서는 25칸 중 자격 4칸, 기대R 평균 -0.070 이었다")
-    print("      (order_flow_fade 측정 기준). 여기가 확실히 나으면 확장할 값이 있다.")
+    print("판단: 양수비율이 50% 를 넘어야 계통적 우위다. 50% 미만이면 비용이 이긴다.")
+
     return 0
 
 
