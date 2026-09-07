@@ -492,3 +492,39 @@ def test_webhook_ignores_any_price_the_alert_sends(client, monkeypatch):
                           "action": "롱진입", "price": 1.0, "qty": 999})
     assert r.status_code == 200
     assert seen == {"symbol": "BTCUSDT", "action": "롱진입", "source": "tradingview"}
+
+
+def test_order_book_page_is_served_and_is_crypto_only(client):
+    """
+    실시간 호가창 페이지.
+
+    **/fx 와 반드시 분리돼 있어야 한다.** XM MT5 는 호가창을 아예 제공하지
+    않는다 (실측: EURUSD·USDJPY·GOLD·US500Cash·BTCUSD 전부
+    market_book_add=False). 그래서 이 화면은 바이낸스 코인 호가창이고 /fx 가
+    거래하는 통화쌍과 무관하다. 같은 화면에 두면 사람이 그 둘을 섞어 읽는다.
+    그 경고가 화면에 남아 있는지까지 본다.
+    """
+    r = client.get("/book")
+    assert r.status_code == 200
+    text = r.text
+    assert "호가창 현황판" in text
+
+    # 브라우저가 거래소에 직접 붙는다 (서버 중계 아님)
+    assert "wss://fstream.binance.com" in text
+
+    # @aggTrade 는 이 환경에서 10초에 0건이 왔다. @trade 로 바꿨고 되돌리면 안 된다.
+    assert "@trade" in text and "@aggTrade" not in text.split("-->")[1]
+
+    # 사람을 속이지 않기 위한 문구들
+    assert "20단이 전부가 아닙니다" in text        # 보이는 깊이가 전부가 아니다
+    assert "스푸핑" in text                        # 화면 깊이 ≠ 체결될 물량
+    assert "호가창을 제공하지 않아" in text        # FX 는 여기 띄울 수 없다
+
+
+def test_order_book_page_does_not_leak_into_the_fx_dashboard(client):
+    """
+    FX 상황판에 코인 호가창을 끼워 넣으면 MT5 로 거래하는 통화쌍과 아무
+    관계없는 정보를 판단 근거로 읽게 된다.
+    """
+    fx = client.get("/fx").text
+    assert "fstream.binance.com" not in fx

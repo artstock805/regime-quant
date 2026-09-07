@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>호가창 현황판</title>
+<!--
+  실시간 호가창 — **브라우저가 바이낸스에 직접 붙는다.**
+
+  왜 서버를 안 거치나
+      보기만 하는 용도라서다. 서버 중계는 여러 브라우저가 붙어도 거래소
+      연결이 하나로 유지되고 누적 델타를 전략에 재사용할 수 있다는 장점이
+      있지만, 그건 오더플로를 **거래에 쓸 때** 필요한 것이다. 눈으로만 볼
+      거라면 직접 붙는 쪽이 지연이 짧고 서버에 상태가 안 남는다.
+      전략에 먹이려면 그때 서버 중계로 바꿔야 한다.
+
+  왜 FX 상황판이 아니라 따로 있나
+      **XM MT5 는 호가창을 아예 제공하지 않는다** (실측: EURUSD·USDJPY·
+      GOLD·US500Cash·BTCUSD 전부 market_book_add=False). 딜러 시장이라
+      브로커가 자기 호가 한 단만 준다. 그래서 여기 보이는 것은 전부
+      바이낸스 코인 호가창이고, /fx 가 MT5 로 거래하는 통화쌍과는 아무
+      관계가 없다. 같은 화면에 두면 그 둘을 섞어 읽게 된다.
+
+  스트림
+      <sym>@depth20@100ms   상위 20단 스냅샷. 차분(@depth)과 달리 시퀀스
+                            번호를 맞출 필요가 없어 표시용으로는 이쪽이 맞다.
+      <sym>@trade           체결 테이프. m=true 면 매수자가 메이커였다는
+                            뜻이므로 **공격자는 매도자**다. 이 부호를 뒤집으면
+                            델타가 정반대로 쌓인다.
+
+  왜 @aggTrade 가 아니라 @trade 인가
+      처음에 @aggTrade 로 만들었더니 10초에 0건이 왔다 (연결은 열려 있고
+      오류도 없었다). 같은 조건에서 @trade 는 93건, @bookTicker 716건,
+      @depth5 79건이 정상으로 왔고 REST 로 확인한 체결은 초당 여러 건이었다.
+      즉 데이터가 없는 게 아니라 그 스트림만 안 왔다.
+      @trade 는 체결을 하나씩 주므로 @aggTrade(같은 가격·방향을 묶은 것)보다
+      오히려 세밀하고, m 필드가 똑같이 있어 공격자 방향을 그대로 알 수 있다.
+      바꿔서 잃는 것이 없다.
+-->
+<style>
+  :root{
+    --bg:#0d1117; --panel:#151b24; --panel2:#1b222d; --line:#232b38;
+    --fg:#e6edf3; --dim:#8b98a9; --faint:#5c6875;
+    --up:#3fb950; --down:#f85149; --accent:#58a6ff; --warn:#d29922;
+    --bidbar:#12351f; --askbar:#3a1616;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--fg);overflow:hidden;
+       font:13px/1.5 "Malgun Gothic","Segoe UI",system-ui,sans-serif}
+  a{color:var(--accent);text-decoration:none}
+
+  .app{display:grid;height:100vh;
+       grid-template-rows:44px auto 1fr;
+       grid-template-columns:1fr 300px;
+       grid-template-areas:"top top" "note note" "book side";}
+  @media(max-width:900px){
+    .app{grid-template-columns:1fr;grid-template-rows:44px auto 60vh auto;
+         grid-template-areas:"top" "note" "book" "side";overflow:auto}
+    body{overflow:auto}
+  }
+
+  .top{grid-area:top;display:flex;align-items:center;gap:12px;padding:0 14px;
+       border-bottom:1px solid var(--line);background:var(--panel)}
+  .top .brand{font-weight:700}
+  .chip{background:#1c2532;border:1px solid var(--line);border-radius:999px;
+        padding:2px 9px;font-size:11px;color:var(--dim)}
+  .chip.on{background:#12251a;border-color:#245c33;color:#7ee89b}
+  .chip.off{background:#3a1010;border-color:#7a2020;color:#ff9a9a}
+  .top nav{margin-left:auto;display:flex;gap:5px}
+  .top nav a{padding:4px 11px;border-radius:7px;border:1px solid var(--line);
+             font-size:12px;color:var(--dim)}
+  select,button{background:#1c222b;border:1px solid var(--line);color:var(--fg);
+    border-radius:7px;padding:4px 9px;font-size:12px;font-family:inherit;
+    cursor:pointer}
+
+  .note{grid-area:note;padding:8px 14px;border-bottom:1px solid var(--line);
+        background:#11161e;font-size:11.5px;color:var(--faint)}
+  .note b{color:var(--warn)}
+
+  /* ── 호가 사다리 ── */
+  .book{grid-area:book;overflow:auto;padding:10px 14px}
+  table.lad{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;
+            font-size:12.5px}
+  table.lad th{position:sticky;top:0;background:#131922;color:var(--faint);
+               font-weight:600;padding:5px 8px;border-bottom:1px solid var(--line);
+               text-align:right;font-size:11px}
+  table.lad th:nth-child(2){text-align:left}
+  table.lad td{padding:2px 8px;text-align:right;position:relative;
+               border-bottom:1px solid #161d26}
+  table.lad td.px{text-align:left;font-weight:700}
+  .ask .px{color:var(--down)} .bid .px{color:var(--up)}
+  /* 막대는 배경으로 깔아 숫자를 가리지 않게 한다 */
+  .bar{position:absolute;top:1px;bottom:1px;right:0;z-index:0;border-radius:2px}
+  .ask .bar{background:var(--askbar)} .bid .bar{background:var(--bidbar)}
+  td span{position:relative;z-index:1}
+  tr.mid td{background:#0f1620;border-top:1px solid #2a3444;
+            border-bottom:1px solid #2a3444;padding:6px 8px}
+  tr.mid b{font-size:14px}
+
+  /* ── 오른쪽 ── */
+  .side{grid-area:side;overflow-y:auto;border-left:1px solid var(--line);
+        background:var(--panel);padding:12px}
+  .side h3{font-size:11px;margin:0 0 9px;color:var(--dim);letter-spacing:.6px;
+           text-transform:uppercase;font-weight:700}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+        padding:11px 13px;margin-bottom:11px}
+  .kv{display:flex;justify-content:space-between;gap:10px;padding:4px 0;
+      border-bottom:1px dashed #232b38;font-size:12.5px}
+  .kv:last-child{border-bottom:0}
+  .kv span:first-child{color:var(--dim)}
+  .kv span:last-child{font-variant-numeric:tabular-nums}
+  .pos{color:var(--up)} .neg{color:var(--down)}
+  .tape{max-height:340px;overflow-y:auto;font-size:11.5px;
+        font-variant-numeric:tabular-nums}
+  .tape div{display:flex;gap:8px;padding:2px 0;border-bottom:1px solid #1a212b}
+  .tape .t{color:var(--faint);flex:none;width:62px}
+  .tape .q{margin-left:auto}
+  .empty{color:var(--faint);font-size:12px;padding:6px 0}
+  .imb{height:8px;border-radius:4px;background:var(--down);overflow:hidden;
+       margin:6px 0 2px}
+  .imb i{display:block;height:100%;background:var(--up)}
+  .sub{font-size:10.5px;color:var(--faint)}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="top">
+    <span class="brand">호가창 현황판</span>
+    <span class="chip" id="conn">연결 중…</span>
+    <select id="sym">
+      <option value="btcusdt">BTC/USDT</option>
+      <option value="ethusdt">ETH/USDT</option>
+      <option value="solusdt">SOL/USDT</option>
+      <option value="bnbusdt">BNB/USDT</option>
+      <option value="xrpusdt">XRP/USDT</option>
+      <option value="dogeusdt">DOGE/USDT</option>
+    </select>
+    <button id="reset">누적 초기화</button>
+    <nav>
+      <a href="/fx">FX 상황판</a>
+      <a href="/cockpit">복기</a>
+    </nav>
+  </div>
+
+  <div class="note">
+    바이낸스 USDⓈ-M 선물 · 호가 20단 100ms · 체결 테이프 —
+    <b>보이는 20단이 전부가 아닙니다.</b> 그 밖의 큰 대기 주문은 안 보이고,
+    코인 호가창에는 스푸핑·레이어링이 흔해서 화면의 깊이가 실제로 체결될
+    물량이라는 보장이 없습니다.
+    <b>MT5(XM)는 호가창을 제공하지 않아</b> /fx 의 통화쌍은 여기 띄울 수 없습니다 —
+    이 화면은 코인 전용이고 FX 거래와 무관합니다.
+    누적 델타는 <b>이 탭을 연 뒤부터</b>만 셉니다(새로고침하면 0).
+  </div>
+
+  <div class="book">
+    <table class="lad">
+      <thead><tr>
+        <th style="width:22%">누적</th>
+        <th style="width:28%">가격</th>
+        <th style="width:25%">수량</th>
+        <th style="width:25%">금액(USDT)</th>
+      </tr></thead>
+      <tbody id="lad">
+        <tr><td colspan="4"><div class="empty">호가를 기다리는 중…</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="side">
+    <div class="card">
+      <h3>스프레드 · 불균형</h3>
+      <div id="stats"><div class="empty">—</div></div>
+    </div>
+
+    <div class="card">
+      <h3>체결 테이프</h3>
+      <div class="tape" id="tape"><div class="empty">체결을 기다리는 중…</div></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+
+const LEVELS = 20;
+let ws = null, sym = "btcusdt";
+let book = {bids: [], asks: []};
+let tape = [];                 // 최근 체결 (최신이 앞)
+let cvd = 0, buyVol = 0, sellVol = 0, nTrades = 0;
+let dirty = false;
+
+function fmtPx(v) {
+  const n = +v;
+  // 코인마다 자릿수가 다르다 (BTC 는 1자리, DOGE 는 5자리). 값 크기로 정한다.
+  const d = n >= 1000 ? 1 : n >= 10 ? 2 : n >= 1 ? 4 : 6;
+  return n.toFixed(d);
+}
+function fmtQty(v) {
+  const n = +v;
+  return n >= 1000 ? n.toFixed(0) : n >= 1 ? n.toFixed(2) : n.toFixed(4);
+}
+function fmtUsd(v) {
+  const n = +v;
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return n.toFixed(0);
+}
+
+function setConn(state, text) {
+  const c = $("#conn");
+  c.textContent = text;
+  c.className = "chip " + state;
+}
+
+/* ── 호가 사다리 ─────────────────────────────────────────────────
+   매도(asks)를 위에 역순으로, 매수(bids)를 아래에 놓는다. 실제 호가창과
+   같은 배치라 눈이 익숙하고, 가운데가 현재가가 된다. */
+function renderBook() {
+  const asks = book.asks.slice(0, LEVELS);
+  const bids = book.bids.slice(0, LEVELS);
+  if (!asks.length || !bids.length) return;
+
+  // 막대 길이는 양쪽을 합친 최대 수량으로 정규화한다. 한쪽만으로 정규화하면
+  // 매수·매도 막대가 서로 다른 축을 쓰게 되어 크기 비교가 거짓이 된다.
+  const maxQ = Math.max(...asks.map(l => +l[1]), ...bids.map(l => +l[1])) || 1;
+
+  let cum = 0;
+  const askRows = asks.map(l => {           // 누적은 안쪽(중앙)부터 쌓는다
+    cum += +l[1];
+    return {px: +l[0], qty: +l[1], cum};
+  }).reverse();                             // 화면에는 높은 가격이 위
+
+  cum = 0;
+  const bidRows = bids.map(l => {
+    cum += +l[1];
+    return {px: +l[0], qty: +l[1], cum};
+  });
+
+  const row = (r, side) => `
+    <tr class="${side}">
+      <td><span>${fmtQty(r.cum)}</span></td>
+      <td class="px"><span>${fmtPx(r.px)}</span></td>
+      <td><div class="bar" style="width:${(r.qty / maxQ * 100).toFixed(1)}%"></div>
+          <span>${fmtQty(r.qty)}</span></td>
+      <td><span>${fmtUsd(r.px * r.qty)}</span></td>
+    </tr>`;
+
+  const bestAsk = +asks[0][0], bestBid = +bids[0][0];
+  const mid = (bestAsk + bestBid) / 2;
+  const spread = bestAsk - bestBid;
+
+  $("#lad").innerHTML =
+    askRows.map(r => row(r, "ask")).join("") +
+    `<tr class="mid"><td></td>
+       <td class="px"><b>${fmtPx(mid)}</b></td>
+       <td colspan="2" style="text-align:left;color:var(--dim)">
+         스프레드 ${fmtPx(spread)} (${(spread / mid * 1e4).toFixed(2)}bp)</td></tr>` +
+    bidRows.map(r => row(r, "bid")).join("");
+
+  renderStats(bestBid, bestAsk, bidRows, askRows);
+}
+
+function renderStats(bestBid, bestAsk, bidRows, askRows) {
+  const bidDepth = bidRows.length ? bidRows[bidRows.length - 1].cum : 0;
+  const askDepth = askRows.length ? askRows[0].cum : 0;
+  const total = bidDepth + askDepth;
+  const bidShare = total ? bidDepth / total : 0.5;
+  const mid = (bestBid + bestAsk) / 2;
+
+  $("#stats").innerHTML = `
+    <div class="kv"><span>중간가</span><span>${fmtPx(mid)}</span></div>
+    <div class="kv"><span>스프레드</span><span>${
+      ((bestAsk - bestBid) / mid * 1e4).toFixed(2)} bp</span></div>
+    <div class="kv"><span>20단 매수 깊이</span><span>${fmtQty(bidDepth)}</span></div>
+    <div class="kv"><span>20단 매도 깊이</span><span>${fmtQty(askDepth)}</span></div>
+    <div class="imb"><i style="width:${(bidShare * 100).toFixed(1)}%"></i></div>
+    <div class="sub">매수 ${(bidShare * 100).toFixed(1)}% ·
+      매도 ${((1 - bidShare) * 100).toFixed(1)}% (20단 한정)</div>
+    <div class="kv" style="margin-top:8px"><span>누적 델타</span><span class="${
+      cvd >= 0 ? "pos" : "neg"}">${cvd >= 0 ? "+" : ""}${fmtQty(cvd)}</span></div>
+    <div class="kv"><span>공격 매수</span><span class="pos">${fmtQty(buyVol)}</span></div>
+    <div class="kv"><span>공격 매도</span><span class="neg">${fmtQty(sellVol)}</span></div>
+    <div class="kv"><span>체결 수</span><span>${nTrades.toLocaleString()}</span></div>
+    <div class="sub">이 탭을 연 뒤부터만 셉니다</div>`;
+}
+
+function renderTape() {
+  if (!tape.length) return;
+  $("#tape").innerHTML = tape.slice(0, 60).map(t => `
+    <div>
+      <span class="t">${t.at}</span>
+      <span class="${t.buy ? "pos" : "neg"}">${t.buy ? "매수" : "매도"}</span>
+      <span>${fmtPx(t.px)}</span>
+      <span class="q">${fmtQty(t.qty)}</span>
+    </div>`).join("");
+}
+
+/* 100ms 마다 DOM 을 다시 만들면 브라우저가 못 따라간다.
+   프레임에 한 번만 그린다. */
+function tick() {
+  if (dirty) { renderBook(); renderTape(); dirty = false; }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+function connect() {
+  if (ws) { ws.onclose = null; ws.close(); }
+  book = {bids: [], asks: []};
+  tape = [];
+  $("#lad").innerHTML =
+    '<tr><td colspan="4"><div class="empty">호가를 기다리는 중…</div></td></tr>';
+
+  const streams = `${sym}@depth${LEVELS}@100ms/${sym}@trade`;
+  setConn("", "연결 중…");
+  ws = new WebSocket(`wss://fstream.binance.com/stream?streams=${streams}`);
+
+  ws.onopen = () => setConn("on", "연결됨 · " + sym.toUpperCase());
+  ws.onclose = () => {
+    setConn("off", "끊김 — 5초 후 재연결");
+    setTimeout(() => { if (ws && ws.readyState === WebSocket.CLOSED) connect(); }, 5000);
+  };
+  ws.onerror = () => setConn("off", "연결 오류");
+
+  ws.onmessage = ev => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    const d = msg.data;
+    if (!d) return;
+
+    // **분기는 반드시 d.e 로 한다.** 필드 존재로 판단하면 체결 메시지의
+    // a(집계 체결 ID)를 호가 배열로 오인해 book.asks 에 숫자가 들어간다.
+    if (d.e === "depthUpdate") {
+      // 부분 호가창 스냅샷이라 그대로 갈아 끼우면 된다 (차분 병합 불필요)
+      if (Array.isArray(d.b)) book.bids = d.b;
+      if (Array.isArray(d.a)) book.asks = d.a;
+      dirty = true;
+    } else if (d.e === "trade") {
+      // **m=true 는 "매수자가 메이커"다 → 공격자는 매도자.**
+      // 이 부호를 뒤집으면 델타가 정반대로 쌓인다.
+      const buy = d.m === false;
+      const qty = +d.q;
+      cvd += buy ? qty : -qty;
+      if (buy) buyVol += qty; else sellVol += qty;
+      nTrades++;
+      const t = new Date(d.T);
+      tape.unshift({
+        at: t.toTimeString().slice(0, 8), px: +d.p, qty, buy,
+      });
+      if (tape.length > 200) tape.length = 200;
+      dirty = true;
+    }
+  };
+}
+
+$("#sym").onchange = e => { sym = e.target.value; resetCounters(); connect(); };
+$("#reset").onclick = resetCounters;
+
+function resetCounters() {
+  cvd = 0; buyVol = 0; sellVol = 0; nTrades = 0; dirty = true;
+}
+
+connect();
+</script>
+</body>
+</html>
