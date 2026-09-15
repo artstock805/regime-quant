@@ -565,3 +565,22 @@ def test_order_book_page_does_not_leak_into_the_fx_dashboard(client):
     fx = client.get("/fx").text
     assert "fstream.binance.com" not in fx
     assert "/ws/book" not in fx
+
+
+def test_the_chart_has_no_indicators(client):
+    """
+    **차트에 보조지표를 걸지 않는다.**
+
+    전에는 RSI 와 단순이동평균이 걸려 있었는데 성과 근거가 아니라 트레이딩뷰
+    위젯 기본값이라서 들어간 것이었다. 그리고 엔진이 보는 것과도 무관하다 —
+    엔진은 11개 전략의 가중 합산으로 판단한다. 화면과 판단이 다르면 사람이
+    둘을 섞어 읽는다.
+
+    더 큰 이유는 측정이다. 여덟 번의 독립 측정에서 지표로 방향을 맞추는 것이
+    한 번도 우연과 구분되지 않았고, |IC| 상위였던 변동성·평균회귀 지표들은
+    **지수가 장기 우상향한다는 사실 하나**를 재고 있었다(지수 15/15 일치,
+    FX 에서는 정확히 0). 근거 없는 지표를 띄우면 그걸 보고 판단하고 싶어진다.
+    """
+    text = client.get("/fx").text
+    assert "tv-basicstudies" not in text, "차트에 보조지표가 다시 붙었다"
+    assert "studies:" not in text
