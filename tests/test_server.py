@@ -584,3 +584,46 @@ def test_the_chart_has_no_indicators(client):
     text = client.get("/fx").text
     assert "tv-basicstudies" not in text, "차트에 보조지표가 다시 붙었다"
     assert "studies:" not in text
+
+
+def test_the_account_card_leads_with_risk(client):
+    """
+    **실거래를 대비한 배치다.** 숫자 아홉 개를 같은 크기로 나열하면 무엇이
+    중요한지가 안 보인다. 평가액을 크게, 그 아래 한도까지 얼마나 남았는지를
+    막대로 둔다.
+
+    특히 두 가지는 실거래에서 없으면 안 된다.
+      · **일일 손실 한도** — 가드가 그날 진입을 막는 시점. 화면이 따로 만든
+        숫자를 띄우면 가드가 실제로 막는 때와 어긋나므로 guard 값을 그대로 쓴다.
+      · **증거금 유지율** — FX 에서 강제청산을 가늠하는 단 하나의 숫자다.
+        XM 기준 50% 마진콜 · 20% 강제청산.
+    """
+    text = client.get("/fx").text
+    assert "일일 손실 한도" in text
+    assert "증거금 유지율" in text
+    assert "마진콜" in text and "강제청산" in text
+    # 가드 값을 그대로 쓰는지 (화면이 자체 계산하면 어긋난다)
+    assert "guardState" in text
+    assert "daily_loss_limit_usdt" in text
+
+
+def test_a_live_account_badge_cannot_look_like_demo(client):
+    """
+    **실계좌 배지는 데모와 달라야 한다.** 같은 모양이면 착각한 채로 주문을
+    낸다. 실계좌는 빨강 계열로 따로 칠한다.
+    """
+    text = client.get("/fx").text
+    assert ".live.demo{" in text and ".live.real{" in text
+    demo = text.split(".live.demo{")[1].split("}")[0]
+    real = text.split(".live.real{")[1].split("}")[0]
+    assert demo != real, "데모와 실계좌 배지가 같은 모양이다"
+
+
+def test_margin_level_is_not_faked_when_there_is_no_position(client):
+    """
+    포지션이 없으면 증거금 유지율은 정의되지 않는다(0 으로 나눈다).
+    그때 0 이나 100 을 보여 주면 거짓말이다 — "포지션 없음" 이라고 써야 한다.
+    """
+    text = client.get("/fx").text
+    assert "포지션 없음" in text
+    assert "if (!used || used <= 0) return null;" in text

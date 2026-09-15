@@ -95,6 +95,35 @@
        color:var(--faint)}
   .src.mine{color:#9ecbff;border-color:#2d4a6b;background:#132234}
 
+  /* ── 잔고 요약 (한눈에 보는 것이 목적이다) ──
+     실거래를 대비해 **위험을 먼저 보이게** 배치한다. 숫자 아홉 개를 같은
+     크기로 나열하면 무엇이 중요한지가 안 보인다. 평가액을 크게, 그 아래
+     오늘 손익, 그다음 한도까지 얼마나 남았는지를 막대로 둔다. */
+  .bigeq{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;
+         letter-spacing:-.5px;line-height:1.15}
+  .bigcur{font-size:13px;color:var(--dim);font-weight:400;margin-left:4px}
+  .bigsub{font-size:12.5px;font-variant-numeric:tabular-nums;margin-top:2px}
+  .live{display:inline-block;font-size:10px;font-weight:700;padding:2px 7px;
+        border-radius:999px;vertical-align:2px;margin-left:6px}
+  .live.demo{background:#12251a;border:1px solid #245c33;color:#7ee89b}
+  /* **실계좌는 눈에 확 띄어야 한다.** 데모와 같은 모양이면 착각한다. */
+  .live.real{background:#4a0d0d;border:1px solid #c0392b;color:#ff8a80}
+  .gauge{margin:9px 0 3px}
+  .gauge .lbl{display:flex;justify-content:space-between;font-size:11px;
+              color:var(--dim);margin-bottom:3px}
+  .gauge .lbl b{font-variant-numeric:tabular-nums;color:var(--fg)}
+  .gbar{height:7px;border-radius:4px;background:#222b37;overflow:hidden}
+  .gbar i{display:block;height:100%;border-radius:4px;transition:width .3s}
+  .g-ok{background:var(--up)} .g-warn{background:var(--warn)}
+  .g-bad{background:var(--down)}
+  .gnote{font-size:10.5px;color:var(--faint);margin-top:3px}
+  .kvs{margin-top:9px;border-top:1px solid var(--line);padding-top:7px}
+  details.more{margin-top:7px}
+  details.more summary{font-size:11px;color:var(--faint);cursor:pointer;
+                       list-style:none;user-select:none}
+  details.more summary::-webkit-details-marker{display:none}
+  details.more summary:hover{color:var(--dim)}
+
   /* ── 잔고 곡선 ── */
   .spark{width:100%;height:36px;display:block;margin:8px 0 2px}
   .sparknote{font-size:10.5px;color:var(--faint);text-align:right}
@@ -392,7 +421,7 @@ function renderStatus(s) {
    실현손익·입금액·수익률처럼 천천히 바뀌는 값을 준다. 둘을 합쳐 한 카드에
    그린다 — 평가액이 5초마다 살아 움직이면서 "이게 벌어서 이렇게 된 건지"도
    같이 보이게 하려는 것이다. */
-let bal = null;
+let bal = null, guardState = null, histSummary = null;
 
 // 국면 이름. 서버는 내부 값(uptrend)을 주는데 화면은 한국어로 통일한다.
 const REGIME_KO = {uptrend: "상승추세", downtrend: "하락추세",
@@ -442,28 +471,103 @@ function sparkline(curve) {
       ${lo.toFixed(0)} ~ ${hi.toFixed(0)}</div>`;
 }
 
-function renderAccount(a) {
-  $("#acctkind").textContent = a.is_demo ? "데모" : "실계좌";
-  const cur = a.currency;
-  const rows = [
-    ["잔고", money(a.balance, cur)],
-    ["평가액", `<b>${money(a.equity, cur)}</b>`],
-    ["미실현", signed(a.equity - a.balance)],
-  ];
-  if (bal) {
-    rows.push(["실현 손익", signed(bal.realised)]);
-    if (bal.funding?.deposit) rows.push(["입금액", money(bal.funding.deposit, cur)]);
-    if (bal.return_pct !== null && bal.return_pct !== undefined)
-      rows.push(["입금 대비", `<span class="${bal.return_pct >= 0 ? "pos" : "neg"}">${
-        bal.return_pct >= 0 ? "+" : ""}${bal.return_pct.toFixed(2)}%</span>`]);
-    rows.push(["사용 증거금", money(bal.margin_used, "")]);
-  }
-  rows.push(["여유 증거금", money(a.margin_free, "")]);
-  rows.push(["레버리지", `1:${a.leverage}`]);
+function gauge(label, valueText, frac, cls, note) {
+  const w = Math.max(0, Math.min(1, frac)) * 100;
+  return `<div class="gauge">
+    <div class="lbl"><span>${label}</span><b>${valueText}</b></div>
+    <div class="gbar"><i class="${cls}" style="width:${w.toFixed(1)}%"></i></div>
+    ${note ? `<div class="gnote">${note}</div>` : ""}</div>`;
+}
 
-  $("#account").innerHTML =
-    rows.map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v}</span></div>`)
-        .join("") + (bal ? sparkline(bal.curve) : "");
+/* 증거금 유지율 = 평가액 / 사용증거금 × 100.
+   **FX 에서 강제청산을 가늠하는 단 하나의 숫자다.** XM 기준 50% 에서
+   마진콜, 20% 에서 강제청산된다. 포지션이 없으면 정의되지 않는다 —
+   그때 0 이나 100 을 보여 주면 거짓말이 되므로 "포지션 없음"이라고 쓴다. */
+function marginLevel(eq, used) {
+  if (!used || used <= 0) return null;
+  return eq / used * 100;
+}
+
+function renderAccount(a) {
+  $("#acctkind").textContent = "";
+  const cur = a.currency;
+  const eq = a.equity, unreal = a.equity - a.balance;
+  const dep = bal?.funding?.deposit || 0;
+  const pnl = dep ? eq - dep : null;
+  const today = histSummary?.realised_today ?? null;
+
+  // 실계좌면 배지가 빨갛게 나온다. 데모와 같은 모양이면 착각한다.
+  const badge = `<span class="live ${a.is_demo ? "demo" : "real"}">${
+    a.is_demo ? "데모" : "실계좌"}</span>`;
+
+  let head = `<div class="bigeq">${money(eq, "")}<span class="bigcur">${cur}</span>
+      ${badge}</div>`;
+  if (pnl !== null) {
+    const pct = dep ? pnl / dep * 100 : 0;
+    head += `<div class="bigsub"><span class="${pnl >= 0 ? "pos" : "neg"}">${
+      pnl >= 0 ? "+" : ""}${money(pnl, "")} (${pct >= 0 ? "+" : ""}${
+      pct.toFixed(2)}%)</span> <span style="color:var(--faint)">입금 ${
+      money(dep, "")} 대비</span></div>`;
+  }
+
+  // ── 일일 손실 한도. **엔진 가드가 실제로 쓰는 값을 그대로 보여 준다.**
+  //    화면이 만든 숫자를 띄우면 가드가 막는 시점과 어긋난다.
+  let gauges = "";
+  const lim = guardState?.daily_loss_limit_usdt;   // 음수
+  const realisedToday = guardState?.realised_today ?? today ?? 0;
+  if (lim) {
+    const used = Math.max(0, -Math.min(0, realisedToday));
+    const frac = used / Math.abs(lim);
+    gauges += gauge(
+      "일일 손실 한도",
+      `${money(used, "")} / ${money(Math.abs(lim), "")}`,
+      frac,
+      frac > 0.8 ? "g-bad" : frac > 0.5 ? "g-warn" : "g-ok",
+      `한도에 닿으면 그날은 진입이 막힙니다 (잔고의 ${
+        ((guardState?.limits?.daily_loss_limit ?? 0) * 100).toFixed(1)}%)`);
+  }
+
+  const ml = marginLevel(eq, bal?.margin_used ?? 0);
+  if (ml === null) {
+    gauges += `<div class="gauge"><div class="lbl"><span>증거금 유지율</span>
+      <b style="color:var(--faint)">포지션 없음</b></div></div>`;
+  } else {
+    // 500% 를 가득 찬 것으로 본다. 79,000% 를 그대로 그리면 늘 100% 라
+    // 위험이 다가오는 것이 안 보인다.
+    const frac = Math.min(1, ml / 500);
+    const cls = ml < 50 ? "g-bad" : ml < 200 ? "g-warn" : "g-ok";
+    const tag = ml < 20 ? "강제청산 임박" : ml < 50 ? "마진콜 구간"
+              : ml < 200 ? "주의" : "안전";
+    // 8만% 같은 값은 그대로 쓰면 읽히지 않고 뜻도 없다 — 위험 구간에서
+    // 한참 먼 상태라는 것만 전하면 된다.
+    const shown = ml >= 1000 ? "1,000%+" : `${ml.toFixed(0)}%`;
+    gauges += gauge("증거금 유지율", `${shown} · ${tag}`,
+      frac, cls, "50% 마진콜 · 20% 강제청산 (XM 기준)");
+  }
+
+  const rows = [
+    ["오늘 실현", today === null ? "—" : signed(today)],
+    ["미실현", signed(unreal)],
+    ["누적 실현", bal ? signed(bal.realised) : "—"],
+  ];
+
+  // 자주 안 보는 것은 접어 둔다. 한눈에 보는 것이 목적이므로.
+  const more = [
+    ["잔고", money(a.balance, cur)],
+    ["사용 증거금", bal ? money(bal.margin_used, "") : "—"],
+    ["여유 증거금", money(a.margin_free, "")],
+    ["레버리지", `1:${a.leverage}`],
+    ["건당 위험", guardState?.limits
+      ? `${(guardState.limits.risk_per_trade * 100).toFixed(1)}% · 동시 ${
+          guardState.limits.max_positions}종목` : "—"],
+  ];
+
+  $("#account").innerHTML = head + gauges +
+    `<div class="kvs">${rows.map(([k, v]) =>
+      `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join("")}</div>` +
+    `<details class="more"><summary>세부 ▾</summary>${more.map(([k, v]) =>
+      `<div class="kv"><span>${k}</span><span>${v}</span></div>`).join("")}</details>` +
+    (bal ? sparkline(bal.curve) : "");
 }
 
 async function refreshBalance() {
@@ -544,6 +648,7 @@ async function refreshHistory() {
     return;
   }
   const s = d.summary;
+  histSummary = s;          // 계좌 카드의 '오늘 실현' 이 이걸 쓴다
   // 엔진 성적과 사람이 손으로 한 거래를 **절대 한 덩어리로 합치지 않는다.**
   // 합치면 엔진이 벌었는지 사람이 벌었는지 알 수 없다.
   $("#histsum").innerHTML =
@@ -656,6 +761,9 @@ function engineLoopRow(st) {
 
 function renderEngine(st) {
   if (!st) return;
+  // **가드 값을 계좌 카드가 그대로 쓴다.** 화면이 따로 만든 숫자를 띄우면
+  // 가드가 실제로 막는 시점과 어긋난다.
+  guardState = st.guard || null;
   const box = $("#engine");
   const v = st.verdict || {};
   const killed = st.guard?.kill_switch;
