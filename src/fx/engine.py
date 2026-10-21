@@ -183,14 +183,23 @@ class FxTrader:
         FX 에서 돌릴 수 있는 전략만. 파생 데이터를 요구하는 것은 제외한다 —
         FX 에는 자금조달률도 미결제약정도 테이커 비율도 없고, 없는 열을 0 으로
         채우면 신호가 아니라 잡음이 된다.
+
+        **거름망이 둘인 이유.** `fx.strategies` 는 허용목록이라 비워 두면 전부
+        쓴다. 특정 전략 하나를 빼려고 나머지 열을 적으면, 나중에 전략을 추가할
+        때 목록에 넣는 것을 잊고 **조용히 빠진다**. 그래서 금지목록
+        `fx.exclude_strategies` 를 따로 둔다 — 새 전략은 기본으로 들어오고,
+        빼는 것만 이름으로 명시된다.
         """
         names = set(self.cfg.get("fx.strategies") or [])
+        banned = set(self.cfg.get("fx.exclude_strategies") or [])
         out = []
         for s in build_all():
             if any(str(n).startswith(("perp_", "funding", "oi_", "basis"))
                    for n in getattr(s, "needs", ())):
                 continue
             if names and s.name not in names:
+                continue
+            if s.name in banned:
                 continue
             out.append(s)
         return out

@@ -310,6 +310,32 @@ def test_some_strategies_survive_the_filter(trader):
     assert len(trader.strategies()) > 0, "FX 에서 돌릴 전략이 하나도 없다"
 
 
+def test_a_banned_strategy_is_left_out(trader):
+    """fx.exclude_strategies 에 적힌 이름은 투표에 들어오지 않는다."""
+    banned = set(trader.cfg.get("fx.exclude_strategies") or [])
+    assert banned, "금지목록이 비어 있다 — 이 테스트가 아무것도 재지 않는다"
+    assert banned.isdisjoint({s.name for s in trader.strategies()})
+
+
+def test_the_ban_is_a_denylist_so_new_strategies_still_arrive():
+    """
+    **허용목록이 아니라 금지목록이어야 하는 이유.** 하나를 빼려고 나머지를
+    열거하면, 나중에 전략을 추가할 때 목록에 넣는 것을 잊고 조용히 빠진다.
+    고장 난 것처럼 보이지 않아서 더 나쁘다.
+    """
+    from src.config import Config
+    from src.fx.engine import FxTrader
+
+    everything = {s.name for s in FxTrader(cfg=Config({})).strategies()}
+    one_banned = {s.name for s in FxTrader(
+        cfg=Config({"fx": {"exclude_strategies": ["order_flow_fade"]}})
+    ).strategies()}
+
+    assert "order_flow_fade" in everything, "금지하지 않으면 들어와야 한다"
+    assert everything - one_banned == {"order_flow_fade"}, (
+        "금지한 하나 말고 다른 전략까지 사라졌다")
+
+
 # ─── 대조 ────────────────────────────────────────────────────────
 
 def test_a_position_closed_at_the_broker_is_noticed(trader, monkeypatch):

@@ -222,14 +222,29 @@ def test_the_strategy_is_in_the_pool_and_declares_its_regimes():
     assert s.needs == ("ofi_z", "cvd", "cvd_slope")
 
 
-def test_the_fx_engine_picks_it_up():
+def test_it_is_not_blocked_for_the_wrong_reason():
     """
-    파생 데이터를 요구하지 않으므로 FX 에서도 돌아야 한다. `needs` 에 perp_/
-    funding/oi_/basis 접두사가 들어가면 엔진이 조용히 제외한다.
+    파생 데이터를 요구하지 않는다. `needs` 에 perp_/funding/oi_/basis 접두사가
+    들어가면 엔진이 **조용히** 제외하는데, 그건 "쓸 수 없다"이지 "쓰지 않기로
+    했다"가 아니다. 아래 테스트가 재는 것은 후자이므로 둘을 갈라 둔다.
+    """
+    assert not any(str(n).startswith(("perp_", "funding", "oi_", "basis"))
+                   for n in strategy().needs)
+
+
+def test_the_fx_engine_leaves_it_out_on_purpose():
+    """
+    **일부러 뺐다.** flow_extension_fade 와 사실상 같은 전략이기 때문이다 —
+    포지션을 원한 572봉 중 겹치는 493봉에서 방향이 100% 일치했다. 둘이 동시에
+    자격을 얻으면 같은 아이디어에 표가 두 장 가고 전략당 상한 0.45 를 우회해
+    0.90 까지 실린다. 2026-09-15 GBPUSD 가 정확히 그 상태였다.
+
+    되살리려면 config.yaml 의 fx.exclude_strategies 에서 이름을 지우면 된다.
+    그 전에 중복 투표 문제를 어떻게 할지부터 정해야 한다.
     """
     from src.fx.engine import trader
     names = {s.name for s in trader().strategies()}
-    assert "order_flow_fade" in names
+    assert "order_flow_fade" not in names
 
 
 def _feats(score_series, spread_z=None):
