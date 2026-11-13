@@ -369,20 +369,75 @@ def _enriched(days: int) -> tuple[list[dict], dict]:
 
 @router.get("/api/fx/history")
 def fx_history(days: int = 30, limit: int = 60,
-               only_ours: bool = False) -> dict[str, Any]:
+               only_ours: bool = False, source: str = "") -> dict[str, Any]:
     """
-    닫힌 거래 목록. 우리가 연 것과 사람이 손으로 연 것을 **구분해서** 준다.
-    섞어서 한 덩어리로 보여 주면 엔진 성적을 잘못 읽는다.
+    닫힌 거래 목록. **어느 앱이 낸 거래인지까지** 구분해서 준다.
+
+    이 계좌에는 여러 앱이 주문을 낸다. 섞어서 한 덩어리로 보여 주면 엔진
+    성적을 잘못 읽고, '엔진/수동' 두 칸으로만 갈라도 마찬가지다 — 남의 봇
+    거래가 전부 "수동"이 된다.
+
+    `source` 를 주면 그 앱 것만 돌려준다(요약은 **항상 전체 기준**이다 —
+    걸러 놓고 전체 성적이라고 읽는 일이 없도록).
     """
     trades, flows = _enriched(days)
     shown = [t for t in trades if t["ours"]] if only_ours else trades
+    if source:
+        shown = [t for t in shown if t.get("source") == source]
     return {
         "days": days,
+        "source": source,
         "trades": shown[:limit],
         "truncated": max(0, len(shown) - limit),
         "summary": _history_summary(trades),
         "funding": flows,
     }
+
+
+def _block(rows: list[dict]) -> dict[str, Any]:
+    """거래 묶음 하나의 성적. 엔진·앱별·전체가 **같은 계산**을 쓴다."""
+    if not rows:
+        return {"trades": 0, "net": 0.0, "wins": 0, "win_rate": None,
+                "avg_r": None, "r_known": 0, "best": None, "worst": None,
+                "costs": 0.0}
+    wins = [r for r in rows if r["profit"] > 0]
+    rs = [r["r_multiple"] for r in rows if r.get("r_multiple") is not None]
+    return {
+        "trades": len(rows),
+        "net": round(sum(r["profit"] for r in rows), 2),
+        "wins": len(wins),
+        "win_rate": round(len(wins) / len(rows), 3),
+        "avg_r": round(sum(rs) / len(rs), 3) if rs else None,
+        "r_known": len(rs),
+        "best": round(max(r["profit"] for r in rows), 2),
+        "worst": round(min(r["profit"] for r in rows), 2),
+        # 수수료와 스왑을 따로 보여 준다. 이 프로젝트의 결론이
+        # "우위는 있는데 비용이 먹는다"였으므로 이 숫자가 중요하다.
+        "costs": round(sum(r["commission"] + r["swap"] for r in rows), 2),
+    }
+
+
+def _by_source(trades: list[dict]) -> list[dict[str, Any]]:
+    """
+    **앱별 성적.** 이 계좌에는 여러 앱이 동시에 주문을 낸다.
+
+    화면이 `엔진 / 수동` 두 칸으로만 가르면 남의 봇 거래가 전부 "수동"에
+    쌓인다. 그 라벨을 글자 그대로 읽고 "손으로 연 거래에 손절이 하나도
+    없다"는 진단을 냈다가 틀렸다 — 그 거래들은 손절을 거는 다른 앱 것이었다.
+    화면이 숫자를 잘못 읽게 만들면 그건 화면의 버그다.
+
+    건수 많은 순. 손실이 큰 쪽이 아니라 **활동이 많은 쪽**을 위에 둔다 —
+    돈은 `net` 칸이 말해 주고, 어느 앱이 계좌를 움직이는지가 먼저다.
+    """
+    groups: dict[str, list[dict]] = {}
+    for t in trades:
+        groups.setdefault(t.get("source") or "hand", []).append(t)
+    rows = [
+        {"key": key, "label": g[0].get("source_label") or key, **_block(g)}
+        for key, g in groups.items()
+    ]
+    rows.sort(key=lambda r: (-r["trades"], r["label"]))
+    return rows
 
 
 def _history_summary(trades: list[dict]) -> dict[str, Any]:
@@ -393,32 +448,17 @@ def _history_summary(trades: list[dict]) -> dict[str, Any]:
     승률이 높은데 돈을 잃는다 — 이 프로젝트에서 이미 겪었다(평균회귀 승률
     54.8%, 기대R 음수). 그래서 순손익과 평균 R 을 같이 보여 준다.
     """
-    def block(rows: list[dict]) -> dict[str, Any]:
-        if not rows:
-            return {"trades": 0, "net": 0.0, "wins": 0, "win_rate": None,
-                    "avg_r": None, "best": None, "worst": None, "costs": 0.0}
-        wins = [r for r in rows if r["profit"] > 0]
-        rs = [r["r_multiple"] for r in rows if r.get("r_multiple") is not None]
-        return {
-            "trades": len(rows),
-            "net": round(sum(r["profit"] for r in rows), 2),
-            "wins": len(wins),
-            "win_rate": round(len(wins) / len(rows), 3),
-            "avg_r": round(sum(rs) / len(rs), 3) if rs else None,
-            "r_known": len(rs),
-            "best": round(max(r["profit"] for r in rows), 2),
-            "worst": round(min(r["profit"] for r in rows), 2),
-            # 수수료와 스왑을 따로 보여 준다. 이 프로젝트의 결론이
-            # "우위는 있는데 비용이 먹는다"였으므로 이 숫자가 중요하다.
-            "costs": round(sum(r["commission"] + r["swap"] for r in rows), 2),
-        }
-
+    block = _block
     today = datetime.now(timezone.utc).date().isoformat()
     ours = [t for t in trades if t["ours"]]
     return {
         "ours": block(ours),
+        # 'manual' 은 **엔진이 아닌 전부**라는 뜻이다. 사람이 손으로 낸
+        # 거래가 아니다 — 그 구분은 by_source 가 한다. 이름이 남아 있는 건
+        # 기존 화면·CSV 가 아직 읽기 때문이다.
         "manual": block([t for t in trades if not t["ours"]]),
         "all": block(trades),
+        "by_source": _by_source(trades),
         # R 곡선은 **엔진 거래만** 그린다. 사람이 손으로 낸 거래는 손절가
         # 기록이 없어 1R 이 정의되지 않는다. 섞으면 곡선이 거짓말을 한다.
         "r_curve": _r_curve(ours),
@@ -517,12 +557,13 @@ CSV_COLUMNS = [
     ("stop_loss", "손절가"), ("profit", "순손익"), ("gross", "총손익"),
     ("commission", "수수료"), ("swap", "스왑"), ("r_multiple", "R배수"),
     ("held_minutes", "보유분"), ("regime", "국면"), ("score", "점수"),
-    ("source", "출처"), ("position_id", "포지션ID"),
+    ("source", "출처"), ("closed_by", "청산한앱"), ("position_id", "포지션ID"),
 ]
 
 
 @router.get("/api/fx/history.csv")
-def fx_history_csv(days: int = 30, only_ours: bool = False) -> Response:
+def fx_history_csv(days: int = 30, only_ours: bool = False,
+                   source: str = "") -> Response:
     """
     내역을 CSV 로 내보낸다. 성적을 따로 뜯어보고 싶을 때 쓴다.
 
@@ -533,10 +574,17 @@ def fx_history_csv(days: int = 30, only_ours: bool = False) -> Response:
     trades, _ = _enriched(days)
     if only_ours:
         trades = [t for t in trades if t["ours"]]
+    # 화면에서 앱 하나를 골라 놓고 CSV 를 누르면 **그 앱 것**이 나와야 한다.
+    # 보고 있는 것과 다른 파일이 떨어지면 사람이 그 차이를 모른 채 읽는다.
+    if source:
+        trades = [t for t in trades if t.get("source") == source]
 
     lines = [",".join(ko for _, ko in CSV_COLUMNS)]
     for t in trades:
-        row = {**t, "source": "엔진" if t["ours"] else "수동"}
+        # 앱 이름을 그대로 쓴다. "수동"으로 뭉뚱그리면 CSV 를 받아 본
+        # 사람도 남의 봇 거래를 자기 거래로 읽는다.
+        row = {**t, "source": t.get("source_label")
+               or ("엔진" if t["ours"] else "수동")}
         cells = []
         for key, _ in CSV_COLUMNS:
             v = row.get(key)
@@ -549,7 +597,8 @@ def fx_history_csv(days: int = 30, only_ours: bool = False) -> Response:
 
     body = "﻿" + "\r\n".join(lines) + "\r\n"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
-    name = f"fx-trades-{'engine-' if only_ours else ''}{stamp}.csv"
+    tag = "engine-" if only_ours else (f"{source}-" if source else "")
+    name = f"fx-trades-{tag}{stamp}.csv"
     return Response(
         content=body.encode("utf-8"),
         media_type="text/csv; charset=utf-8",

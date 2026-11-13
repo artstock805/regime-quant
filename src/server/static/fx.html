@@ -94,6 +94,24 @@
   .src{font-size:10px;padding:1px 5px;border-radius:4px;border:1px solid var(--line);
        color:var(--faint)}
   .src.mine{color:#9ecbff;border-color:#2d4a6b;background:#132234}
+  /* 등록 안 된 magic. **눈에 띄어야 한다** — 새 앱이 계좌에 붙었다는 뜻이고,
+     모른 채로 두면 그 거래가 조용히 남의 칸에 섞인다. */
+  .src.unknown{color:#e0b35c;border-color:#5a4520;background:#2a2111}
+
+  /* ── 앱별 성적 ──
+     이 계좌에는 여러 앱이 동시에 주문을 낸다. '엔진/수동' 두 칸으로만 가르면
+     남의 봇 거래가 전부 "수동"에 쌓이고, 그걸 사람 손거래로 읽게 된다.
+     실제로 그렇게 읽고 틀린 진단을 냈다. 그래서 **앱을 따로 세운다.** */
+  .srcbar{display:flex;flex-wrap:wrap;gap:6px;padding:7px 12px;
+          border-bottom:1px solid #1a212b}
+  .srcbar:empty{display:none}
+  .srcchip{display:flex;align-items:baseline;gap:6px;font-size:11px;
+           padding:3px 9px;border:1px solid var(--line);border-radius:6px;
+           background:#121821;cursor:pointer}
+  .srcchip:hover{border-color:#2d4a6b}
+  .srcchip.on{border-color:var(--accent);background:#132234}
+  .srcchip b{font-weight:600;color:var(--fg)}
+  .srcchip .n{color:var(--faint)}
 
   /* ── 잔고 요약 (한눈에 보는 것이 목적이다) ──
      실거래를 대비해 **위험을 먼저 보이게** 배치한다. 숫자 아홉 개를 같은
@@ -212,6 +230,7 @@
         <button class="btn" id="histtoggle" style="padding:3px 9px">접기</button>
       </span>
     </div>
+    <div class="srcbar" id="histsrc"></div>
     <div class="histwrap" id="histwrap">
       <div class="empty" style="padding:10px 12px">읽는 중…</div>
     </div>
@@ -594,6 +613,45 @@ function histBlock(name, b) {
     승률 ${wr}${ar} · 수수료·스왑 ${b.costs.toFixed(2)}`;
 }
 
+// 지금 보고 있는 앱. 빈 문자열이면 전부.
+let srcFilter = "";
+
+function renderSources(rows) {
+  /*
+    **앱별 성적.** 이 계좌에는 엔진 말고도 여러 앱이 주문을 낸다.
+    화면이 '엔진/수동' 두 칸으로만 가르면 남의 봇 거래가 전부 "수동"에
+    쌓이는데, 그 라벨을 그대로 읽고 "손으로 연 거래에 손절이 하나도 없다"는
+    진단을 냈다가 틀렸다 — 그 거래들은 손절을 거는 다른 앱 것이었다.
+    숫자를 잘못 읽게 만드는 화면은 그 자체로 버그다.
+  */
+  const box = $("#histsrc");
+  if (!rows || (rows.length <= 1 && !srcFilter)) { box.innerHTML = ""; return; }
+
+  const chip = (key, label, b) => {
+    const net = b.net >= 0 ? "pos" : "neg";
+    const wr = b.win_rate === null ? "—" : (b.win_rate * 100).toFixed(0) + "%";
+    // 등록 안 된 magic 은 라벨이 '미등록(magic=N)' 으로 온다. 숨기지 않는다.
+    return `<span class="srcchip ${srcFilter === key ? "on" : ""}"
+                  data-src="${esc(key)}" title="승률 ${wr} · 수수료·스왑 ${
+             b.costs.toFixed(2)}">
+      <b>${esc(label)}</b>
+      <span class="n">${b.trades}건</span>
+      <span class="${net}">${b.net >= 0 ? "+" : ""}${b.net.toFixed(2)}</span>
+    </span>`;
+  };
+
+  const total = rows.reduce((a, r) => ({
+    trades: a.trades + r.trades, net: a.net + r.net,
+    costs: a.costs + r.costs, win_rate: null}), {trades: 0, net: 0, costs: 0});
+  box.innerHTML = chip("", "전체", total) +
+                  rows.map(r => chip(r.key, r.label, r)).join("");
+
+  box.querySelectorAll(".srcchip").forEach(el => el.onclick = () => {
+    srcFilter = el.dataset.src === srcFilter ? "" : el.dataset.src;
+    refreshHistory();
+  });
+}
+
 function renderRCurve(s) {
   const box = $("#rcurve");
   const curve = s?.r_curve ?? [];
@@ -640,7 +698,8 @@ async function refreshHistory() {
   const mine = $("#onlyours").checked;
   let d;
   try {
-    d = await api(`/api/fx/history?days=${days}&only_ours=${mine}&limit=200`);
+    d = await api(`/api/fx/history?days=${days}&only_ours=${mine}` +
+                  `&source=${encodeURIComponent(srcFilter)}&limit=200`);
   } catch (e) {
     $("#histsum").textContent = "내역을 읽지 못했습니다";
     $("#histwrap").innerHTML = `<div class="errbox" style="margin:10px 12px">${
@@ -649,17 +708,23 @@ async function refreshHistory() {
   }
   const s = d.summary;
   histSummary = s;          // 계좌 카드의 '오늘 실현' 이 이걸 쓴다
-  // 엔진 성적과 사람이 손으로 한 거래를 **절대 한 덩어리로 합치지 않는다.**
-  // 합치면 엔진이 벌었는지 사람이 벌었는지 알 수 없다.
+  // 엔진 성적과 남의 거래를 **절대 한 덩어리로 합치지 않는다.** 합치면
+  // 엔진이 벌었는지 다른 앱이 벌었는지 알 수 없다.
+  //
+  // 두 번째 칸 이름이 "수동"이 아니라 "그 외"인 이유: 그 안에는 사람이 손으로
+  // 낸 거래보다 **다른 봇이 낸 거래가 훨씬 많다.** "수동"이라고 써 두면
+  // 보는 사람이 전부 자기 손거래로 읽는다 — 실제로 그렇게 읽혔다.
   $("#histsum").innerHTML =
-    histBlock("엔진", s.ours) + " &nbsp;|&nbsp; " + histBlock("수동", s.manual)
+    histBlock("엔진", s.ours) + " &nbsp;|&nbsp; " + histBlock("그 외", s.manual)
     + ` &nbsp;|&nbsp; <em>오늘</em> ${signed(s.realised_today)}`;
 
+  renderSources(s.by_source);
   renderRCurve(s);
 
   if (!d.trades.length) {
     $("#histwrap").innerHTML =
       `<div class="empty" style="padding:10px 12px">${
+        srcFilter ? "이 앱이 이 기간에 청산한 거래가 없습니다." :
         mine ? "엔진이 청산한 거래가 아직 없습니다." :
                "이 기간에 청산된 거래가 없습니다."}</div>`;
     return;
@@ -687,8 +752,14 @@ async function refreshHistory() {
       <td>${r}</td>
       <td>${esc(held)}</td>
       <td class="l">${t.regime ? esc(REGIME_KO[t.regime] ?? t.regime) : ""}</td>
-      <td class="l"><span class="src ${t.ours ? "mine" : ""}">${
-        t.ours ? "엔진" : "수동"}</span></td>
+      <td class="l"><span class="src ${t.ours ? "mine" : ""} ${
+        t.source && t.source.startsWith("magic") ? "unknown" : ""}">${
+        esc(t.source_label || (t.ours ? "엔진" : "수동"))}</span>${
+        // 연 앱과 닫은 앱이 다르면 밝힌다. 앱들이 서로의 포지션을 건드리고
+        // 있다는 뜻이고, 손익을 **연 앱 성적**으로 세고 있으니 보여야 한다.
+        t.closed_by ? `<span class="src unknown" title="${
+          esc(t.source_label)} 가 연 포지션을 ${esc(t.closed_by)} 가 닫았다"
+          style="margin-left:3px">→${esc(t.closed_by)}</span>` : ""}</td>
     </tr>`;
   }).join("");
 
@@ -713,7 +784,8 @@ async function refreshHistory() {
 $("#histcsv").onclick = () => {
   // 화면에서 보고 있는 기간·필터를 그대로 내보낸다. 화면과 파일이 다르면
   // 어느 쪽이 맞는지 알 수 없다.
-  const q = `days=${$("#histdays").value}&only_ours=${$("#onlyours").checked}`;
+  const q = `days=${$("#histdays").value}&only_ours=${$("#onlyours").checked}` +
+            `&source=${encodeURIComponent(srcFilter)}`;
   window.location.href = `/api/fx/history.csv?${q}`;
 };
 

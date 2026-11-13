@@ -24,6 +24,8 @@ from typing import Any
 
 import pandas as pd
 
+from . import sources
+
 # 우리 인터벌 표기 → MT5 상수. 지연 임포트라 여기서는 문자열로만 둔다.
 TIMEFRAMES = {
     "1m": "TIMEFRAME_M1", "5m": "TIMEFRAME_M5", "15m": "TIMEFRAME_M15",
@@ -131,8 +133,11 @@ def to_utc(server_epoch: float) -> datetime:
 # 우리 주문임을 표시하는 번호와 태그 접두사. **거래 내역을 읽는 쪽과 주문을
 # 내는 쪽이 같은 값을 봐야 한다.** 양쪽에 따로 적어 두면 한쪽만 바뀌었을 때
 # 과거 거래가 조용히 "남의 것"으로 분류되고, 성적이 틀리게 나온다.
-MAGIC = 770315
-PREFIX = "rq"
+#
+# 정의는 sources.py 에 있다 — 그 파일이 이 계좌에 주문을 내는 **모든 앱**의
+# 번호를 한자리에 모아 둔 곳이다. 여기서는 이름만 다시 내보낸다.
+MAGIC = sources.MAGIC
+PREFIX = sources.PREFIX
 
 
 class MT5Error(RuntimeError):
@@ -453,6 +458,11 @@ def closed_trades(days: int = 90, raw: list[dict] | None = None) -> list[dict]:
         entry_at = min(d["epoch"] for d in ins)
         exit_at = max(d["epoch"] for d in outs)
         net = sum(d["profit"] + d["commission"] + d["swap"] + d["fee"] for d in g)
+        # **연 쪽이 주인이다.** 한 포지션을 다른 앱이 닫는 일이 실제로
+        # 있다(실측 2건). 체결 순서로 아무거나 고르면 같은 계좌를 두 번
+        # 재면서 답이 달라진다.
+        src_of = sources.of_deals(g, ins)
+        out_of = sources.of_deals(outs)
         trades.append({
             "position_id": pid,
             "symbol": ins[0]["symbol"],
@@ -468,10 +478,18 @@ def closed_trades(days: int = 90, raw: list[dict] | None = None) -> list[dict]:
             "gross": round(sum(d["profit"] for d in g), 2),
             "commission": round(sum(d["commission"] + d["fee"] for d in g), 2),
             "swap": round(sum(d["swap"] for d in g), 2),
-            # 우리가 연 것인가. 사람이 손으로 연 금·지수 거래도 같이 나오므로
-            # 섞이면 성적을 잘못 읽는다.
-            "ours": any(d["magic"] == MAGIC
-                        or d["comment"].strip().startswith(PREFIX) for d in g),
+            # **누가 낸 거래인가.** 이 계좌에는 여러 앱이 동시에 주문을
+            # 낸다. '우리 것/아닌 것' 두 칸으로만 가르면 남의 봇 거래가
+            # 전부 "수동"으로 묶여서 성적을 잘못 읽는다 — 실제로 그렇게
+            # 읽고 틀린 진단을 냈다. 어느 앱인지까지 싣는다(sources.py).
+            "source": src_of.key,
+            "source_label": src_of.label,
+            "magic": next((d["magic"] for d in ins if d["magic"]), 0),
+            # 연 앱과 닫은 앱이 다르면 밝힌다. 앱들이 서로의 포지션을
+            # 건드리고 있다는 뜻이고, 그건 조용히 지나갈 일이 아니다.
+            "closed_by": (out_of.label if out_of.key not in
+                          (src_of.key, sources.HAND.key) else None),
+            "ours": src_of.key == "engine",
             "comment": next((d["comment"] for d in ins if d["comment"]), ""),
         })
     trades.sort(key=lambda t: t["closed_at"], reverse=True)
