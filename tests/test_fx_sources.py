@@ -37,7 +37,7 @@ def _deal(magic: int = 0, comment: str = "") -> dict:
     (940715,   "gates",      "4관문 수동주문"),
 ])
 def test_a_registered_app_is_named_by_its_magic(magic, key, label):
-    """실측한 번호들이다 — 계좌 75592185, 최근 120일 체결 158건."""
+    """실측한 번호들이다 — 데모 계좌 한 개, 최근 120일 체결 158건."""
     s = S.classify(magic, "")
     assert s.key == key
     assert s.label == label
