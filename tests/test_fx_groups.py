@@ -124,8 +124,11 @@ class Book:
     def close(self, ticket, *, allow_live=False, reason="", **kw):
         self.live.pop(str(ticket), None)
         self.closed.append(int(ticket))
+        # 진짜 broker.close_position 과 같은 모양으로 돌려준다 — `reason` 과 `retcode`
+        # 가 들어 있다. 이 가짜가 그것을 빼먹어서 청산 기록 버그가 숨어 있었다.
         return {"ticket": ticket, "closed": True, "symbol": "EURUSD",
-                "side": "LONG", "volume": 0.1, "price": 1.1, "profit": 0.0}
+                "side": "LONG", "volume": 0.1, "price": 1.1, "profit": 0.0,
+                "reason": reason, "retcode": 10009}
 
     def reconcile(self, known):
         return {"open": dict(self.live),
@@ -323,6 +326,43 @@ def test_the_trader_registry_shares_the_guard_and_journal(monkeypatch, tmp_path)
     assert {t.group.name for t in eng.traders()} == {"main", "short"}
     with pytest.raises(KeyError):
         eng.trader("nope")
+
+
+# ─── 청산이 장부에 남는다 ────────────────────────────────────────
+
+def test_a_signal_exit_is_journalled_and_the_cycle_finishes(desk):
+    """
+    실제로 있었던 일. broker 가 돌려준 행의 `reason` 이 엔진이 넘기는 `reason` 과
+    겹쳐 TypeError 가 났다. 포지션은 닫혔는데 장부에는 없고 그 바퀴가 중간에 끊겼다.
+    """
+    main, _, book, drive = desk
+    drive(main, Signal("롱진입", 1))
+    status = drive(main, Signal("청산", 0, stop=None))      # 예외 없이 끝까지 돈다
+    assert book.live == {} and status["last_error"] is None
+
+    closes = [r for r in main.journal.tail(50) if r["kind"] == "close"]
+    assert len(closes) == 1
+    assert closes[0]["reason"] == "신호 청산"                # 우리가 닫은 이유
+    assert closes[0]["broker_reason"] == "rqexit"            # 주문에 넣은 표식
+    assert closes[0]["closed"] is True
+
+
+def test_flatten_journals_every_close(desk):
+    main, short, book, drive = desk
+    drive(main, Signal("롱진입", 1))
+    drive(short, Signal("롱진입", 1))
+    # close_all 은 진짜 broker 것을 쓴다 — 포지션 목록만 가짜 계좌에서 읽게 한다
+    import src.fx.broker as real
+    real_positions = real.positions
+    real.positions = lambda: dict(book.live)
+    try:
+        out = main.flatten()
+    finally:
+        real.positions = real_positions
+    assert len(out) == 2 and book.live == {}
+    closes = [r for r in main.journal.tail(50) if r["kind"] == "close"]
+    assert [c["reason"] for c in closes] == ["전량 청산", "전량 청산"]
+    assert {c["broker_reason"] for c in closes} == {"rqflat"}
 
 
 # ─── 어떤 전략으로 들어갔는가 ────────────────────────────────────

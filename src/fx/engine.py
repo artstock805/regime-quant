@@ -346,8 +346,24 @@ class FxTrader:
         """우리가 연 포지션 전부 청산. 사람이 연 것은 건드리지 않는다."""
         out = broker.close_all(allow_live=self.allow_live, reason="rqflat")
         for row in out:
-            self.journal.write("close", reason=reason, **row)
+            self._journal_close(reason, row)
         return out
+
+    def _journal_close(self, why: str, row: dict) -> None:
+        """
+        청산을 장부에 남긴다.
+
+        broker 가 돌려주는 행에도 `reason` 이 있다 — 청산 주문 comment 에 넣은 표식
+        ("rqexit")이거나 실패 사유다. 우리 사유와 이름이 겹치므로 그쪽을
+        `broker_reason` 으로 옮긴다.
+
+        **실제로 있었던 일이다.** 행을 그대로 풀어 넣자 키워드가 겹쳐 TypeError 가
+        났다. 포지션은 이미 닫혔는데 장부에는 남지 않았고, 그 바퀴에서 뒤 순서의
+        종목들이 통째로 건너뛰어졌다. 테스트의 가짜 브로커가 `reason` 을 돌려주지
+        않아 실제 청산이 처음 일어난 날에야 드러났다.
+        """
+        fields = {k: v for k, v in row.items() if k != "reason"}
+        self.journal.write("close", reason=why, broker_reason=row.get("reason"), **fields)
 
     # ─── 루프 ────────────────────────────────────────────────────
 
@@ -591,7 +607,7 @@ class FxTrader:
         if out.get("closed"):
             self.guard.record_realised(float(out.get("profit") or 0.0))
             self.state.closed.append(out)
-            self.journal.write("close", reason=reason, **out)
+            self._journal_close(reason, out)
 
     def _blocked(self, pair: Pair, reason: str) -> None:
         self.journal.write("blocked", symbol=pair.canonical, reason=reason)
