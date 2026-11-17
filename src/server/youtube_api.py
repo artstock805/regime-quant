@@ -1,0 +1,112 @@
+"""
+유튜브 전략 API — 상황판의 "유튜브 전략" 카드가 쓴다.
+
+    GET    /api/youtube/strategies               저장된 전략 + 켜짐 여부
+    POST   /api/youtube/extract                  URL 을 분석해 저장 (꺼진 채로)
+    POST   /api/youtube/strategies/{name}/enable 켜기·끄기 (본문 {"on": true|false})
+    DELETE /api/youtube/strategies/{name}        삭제
+
+켠 전략은 **FX 엔진의 다음 바퀴부터** 투표에 들어간다. 엔진이 매 바퀴 저장소를
+다시 읽기 때문에 재시작이 필요 없다. 발언권(가중치)은 엔진이 최근 학습 구간
+성적으로 정하고, 그 값은 /api/fx/engine 의 signals[].votes 에 실려 온다.
+
+분석은 자막을 받고 LLM 을 부르느라 수십 초가 걸린다. 동기 핸들러라 FastAPI 가
+스레드풀에서 돌리므로 그동안 시세 갱신이 막히지 않는다.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from ..config import load_config
+from ..youtube import PREFIX, pipeline, store
+from ..youtube.strategy import YoutubeStrategy
+
+router = APIRouter()
+
+
+class ExtractRequest(BaseModel):
+    url: str
+    name: str | None = None
+    overwrite: bool = False
+
+
+class EnableRequest(BaseModel):
+    on: bool
+
+
+def _view(record: dict, engine_interval: str) -> dict[str, Any]:
+    spec = record["spec"]
+    return {
+        **spec,
+        "engine_name": PREFIX + spec["strategy_name"],
+        "enabled": record["enabled"],
+        "source_url": record["source_url"],
+        "created_at": record["created_at"],
+        # 영상의 봉 주기와 엔진이 도는 봉 주기가 다르면 지표 기간의 뜻이 달라진다.
+        # 막지는 않고 화면이 알려 준다.
+        "timeframe_mismatch": spec["timeframe"] != engine_interval,
+    }
+
+
+def _llm_ready() -> bool:
+    try:
+        pipeline.provider()
+        return True
+    except pipeline.PipelineError:
+        return False
+
+
+@router.get("/api/youtube/strategies")
+def youtube_strategies() -> dict[str, Any]:
+    cfg = load_config()
+    interval = str(cfg.get("fx.interval", "1h"))
+    return {
+        "llm_ready": _llm_ready(),
+        "engine_interval": interval,
+        "hold_bars": YoutubeStrategy.defaults()["hold_bars"],
+        "banned": sorted(n for n in (cfg.get("fx.exclude_strategies") or [])
+                         if str(n).startswith(PREFIX)),
+        "strategies": [_view(r, interval) for r in store.load_all(cfg)],
+    }
+
+
+@router.post("/api/youtube/extract")
+def youtube_extract(req: ExtractRequest) -> dict[str, Any]:
+    cfg = load_config()
+    try:
+        record = pipeline.run(req.url, name=req.name or None,
+                              overwrite=req.overwrite, cfg=cfg)
+    except pipeline.PipelineError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:                 # 네트워크·LLM API 오류
+        raise HTTPException(502, f"{type(exc).__name__}: {exc}") from exc
+    return _view(record, str(cfg.get("fx.interval", "1h")))
+
+
+@router.post("/api/youtube/strategies/{name}/enable")
+def youtube_enable(name: str, req: EnableRequest) -> dict[str, Any]:
+    """
+    **JSON 본문으로만 받는다.** 쿼리스트링만으로 켜지면 브라우저에 열린 아무
+    웹페이지가 `fetch(..., {method: "POST", mode: "no-cors"})` 한 줄로 전략을 켤 수
+    있다(이름은 추측 가능하다). application/json 은 사전 요청(preflight)을 거쳐야
+    하고 이 서버는 그것을 허용하지 않으므로, 다른 출처의 페이지는 여기 닿지 못한다.
+    """
+    cfg = load_config()
+    try:
+        record = store.set_enabled(name, req.on, cfg)
+    except store.StoreError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return _view(record, str(cfg.get("fx.interval", "1h")))
+
+
+@router.delete("/api/youtube/strategies/{name}")
+def youtube_delete(name: str) -> dict[str, Any]:
+    try:
+        store.delete(name, load_config())
+    except store.StoreError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"deleted": name}

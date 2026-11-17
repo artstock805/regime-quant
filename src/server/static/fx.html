@@ -189,6 +189,31 @@
   .poscard .h{display:flex;gap:7px;align-items:baseline;font-size:12.5px}
   .poscard .h b{font-size:13px}
   .poscard .d{color:var(--faint);font-size:11px;font-variant-numeric:tabular-nums}
+
+  /* ── 유튜브 전략 ── */
+  .ytform{display:flex;gap:6px}
+  .ytform input{flex:1;min-width:0;background:#0f141b;border:1px solid var(--line);
+                border-radius:7px;color:var(--fg);padding:5px 8px;font:inherit}
+  .ytform input:focus{outline:none;border-color:var(--accent)}
+  .ytopt{display:block;margin:6px 0 4px;font-size:11px;color:var(--faint);cursor:pointer}
+  .ytopt input{vertical-align:-2px}
+  details.yt{border-top:1px solid var(--line);padding:6px 0}
+  details.yt summary{display:flex;align-items:center;gap:7px;cursor:pointer;
+                     list-style:none}
+  details.yt summary::-webkit-details-marker{display:none}
+  details.yt summary b{flex:1;min-width:0;font-size:12px;overflow:hidden;
+                       text-overflow:ellipsis;white-space:nowrap}
+  .ytst{flex:none;font-size:10.5px;color:var(--faint)}
+  .ytst.on{color:var(--up)}
+  .ytst.warn{color:var(--warn)}
+  .ytbody{margin-top:7px;font-size:11.5px;line-height:1.55}
+  .ytbody .warnbox{margin:0 0 4px}
+  .ytk{color:var(--dim);font-size:10.5px;margin-top:7px}
+  .ytbody code{display:block;background:#0f141b;border:1px solid var(--line);
+               border-radius:6px;padding:5px 7px;white-space:pre-wrap;
+               word-break:break-word;font:11px/1.5 Consolas,monospace}
+  .ytbody ul{margin:2px 0 0;padding-left:16px}
+  .ytnote{margin-top:8px;font-size:10.5px;color:var(--faint);line-height:1.5}
 </style>
 </head>
 <body>
@@ -253,6 +278,23 @@
     <div class="card">
       <h3>자동매매</h3>
       <div id="engine"><div class="empty">확인 중…</div></div>
+    </div>
+
+    <div class="card">
+      <h3>유튜브 전략 <span style="text-transform:none;color:var(--faint);
+        font-weight:400">투표 후보</span></h3>
+      <div id="ytkey"></div>
+      <div class="ytform">
+        <input id="yturl" type="url" placeholder="유튜브 영상 URL" autocomplete="off"
+               onkeydown="if (event.key === 'Enter') ytExtract()">
+        <button class="btn go" id="ytgo" onclick="ytExtract()">분석</button>
+      </div>
+      <label class="ytopt"><input type="checkbox" id="ytover">
+        같은 이름이 있으면 덮어쓰기</label>
+      <div id="ytmsg"></div>
+      <div id="ytlist"><div class="empty">확인 중…</div></div>
+      <div class="ytnote">켠 전략은 엔진의 다음 바퀴부터 투표합니다. 발언권은 최근
+        학습 구간 성적이 정하고, 거래가 적거나 기대 R 이 0 이하면 0 입니다.</div>
     </div>
 
     <div class="card">
@@ -836,6 +878,9 @@ function renderEngine(st) {
   // **가드 값을 계좌 카드가 그대로 쓴다.** 화면이 따로 만든 숫자를 띄우면
   // 가드가 실제로 막는 시점과 어긋난다.
   guardState = st.guard || null;
+  // 유튜브 카드가 발언권을 여기 실려 온 투표(signals[].votes)에서 읽는다
+  lastEngine = st;
+  if (ytData && !ytBusy) renderYoutube(ytData);
   const box = $("#engine");
   const v = st.verdict || {};
   const killed = st.guard?.kill_switch;
@@ -873,6 +918,139 @@ function renderEngine(st) {
         color:var(--faint);line-height:1.6">막힌 이유<br>${
         g.recent_blocks.slice(0, 3).map(b =>
           `· ${esc(b.symbol)} — ${esc(b.reason)}`).join("<br>")}</div>` : ""}`;
+}
+
+/* ───────── 유튜브 전략 ─────────
+   URL 을 넣으면 서버가 자막을 받아 규칙을 뽑고 **꺼진 채로** 저장한다.
+   내용을 보고 사람이 켠다 — 본 적 없는 규칙이 투표에 들어가면 안 된다.
+
+   **켰다고 주문에 영향을 주는 것은 아니다.** 발언권은 엔진이 최근 학습 구간
+   성적으로 정한다. 그래서 "켜짐"만 띄우지 않고 지난 바퀴에서 몇 종목에
+   발언권이 있었는지를 같이 보여 준다. 0 이면 고장이 아니라 성적이 그렇다는 뜻이다.
+
+   MT5 가 끊겨 있어도 이 카드는 따로 돈다. 전략을 분석하고 고르는 일은
+   브로커 연결과 상관이 없다. */
+let ytData = null, ytBusy = false, lastEngine = null;
+const ytOpen = new Set();
+
+function ytVoice(engineName) {
+  const votes = (lastEngine?.signals || [])
+    .map(s => (s.votes || []).find(v => v.strategy === engineName))
+    .filter(Boolean);
+  if (!votes.length) return null;
+  return {voiced: votes.filter(v => v.has_voice).length, total: votes.length};
+}
+
+function ytRow(s) {
+  const name = esc(s.strategy_name);
+  const banned = (ytData.banned || []).includes(s.engine_name);
+  const voice = s.enabled && !banned ? ytVoice(s.engine_name) : null;
+  const [status, cls] =
+      !s.enabled ? ["꺼짐", ""]
+    : banned ? ["금지목록에 있어 제외", "warn"]
+    : voice ? [`발언권 ${voice.voiced}/${voice.total} 종목`, voice.voiced ? "on" : "warn"]
+    : ["켜짐 · 다음 바퀴부터", "on"];
+  const inds = (s.indicators_needed || []).map(i => {
+    const p = Object.entries(i.params || {}).map(([k, v]) => `${k}=${v}`).join(", ");
+    return `${i.name}(${p})`;
+  }).join(", ");
+  const ex = s.exit_conditions || {};
+  const exits = [
+    ex.take_profit_pct != null ? `익절 ${(ex.take_profit_pct * 100).toFixed(2)}%` : "",
+    ex.stop_loss_pct != null ? `손절 ${(ex.stop_loss_pct * 100).toFixed(2)}%` : "",
+    ex.indicator_exit || "",
+  ].filter(Boolean).join(" · ");
+  // 저장 파일은 손으로 고칠 수 있다. 유튜브 주소가 아니면 링크로 만들지 않는다.
+  const link = String(s.source_url || "").startsWith("https://www.youtube.com/watch?v=")
+    ? `<a class="btn" href="${esc(s.source_url)}" target="_blank" rel="noopener">영상</a>` : "";
+  return `
+    <details class="yt" ${ytOpen.has(s.strategy_name) ? "open" : ""}
+        ontoggle="this.open ? ytOpen.add('${name}') : ytOpen.delete('${name}')">
+      <summary>
+        <input type="checkbox" ${s.enabled ? "checked" : ""} title="투표에 넣기"
+               onchange="ytToggle('${name}', this.checked)">
+        <b title="${name}">${name}</b>
+        <span class="ytst ${cls}">${esc(status)}</span>
+      </summary>
+      <div class="ytbody">
+        ${s.timeframe_mismatch ? `<div class="warnbox">영상은 ${esc(s.timeframe)}봉
+          기준인데 엔진은 ${esc(ytData.engine_interval)}봉으로 돕니다. 같은 기간
+          숫자가 다른 길이를 뜻합니다.</div>` : ""}
+        <div class="ytk">롱 진입</div>
+        <code>${esc(s.entry_conditions?.long || "(없음)")}</code>
+        <div class="ytk">숏 진입</div>
+        <code>${esc(s.entry_conditions?.short || "(없음)")}</code>
+        <div class="ytk">지표 · ${esc(s.target_market)} · ${esc(s.timeframe)}</div>
+        <div>${esc(inds || "(없음)")}</div>
+        <div class="ytk">수치화한 가정</div>
+        ${(s.quant_assumptions || []).length
+          ? `<ul>${s.quant_assumptions.map(a => `<li>${esc(a)}</li>`).join("")}</ul>`
+          : "<div>(없음)</div>"}
+        <div class="ytk">영상의 청산 규칙 — 기록만, 엔진은 ATR 손절·목표를 씁니다</div>
+        <div>${esc(exits || "(없음)")}</div>
+        <div class="ytk">조건이 참이 된 뒤 ${ytData.hold_bars}봉 동안 그 방향을 유지합니다</div>
+        <div class="btns">${link}
+          <button class="btn stop" onclick="ytDelete('${name}')">삭제</button></div>
+      </div>
+    </details>`;
+}
+
+function renderYoutube(d) {
+  ytData = d;
+  $("#ytkey").innerHTML = d.llm_ready ? "" : `<div class="warnbox">분석하려면
+    GEMINI_API_KEY 또는 OPENAI_API_KEY 환경변수가 필요합니다. 설정한 뒤 서버를
+    다시 시작하세요. 저장된 전략을 켜고 끄는 것은 키 없이도 됩니다.</div>`;
+  $("#ytgo").disabled = ytBusy || !d.llm_ready;
+  $("#ytlist").innerHTML = d.strategies.length
+    ? d.strategies.map(ytRow).join("")
+    : `<div class="empty">저장된 전략이 없습니다.</div>`;
+}
+
+async function refreshYoutube() {
+  try { renderYoutube(await api("/api/youtube/strategies")); }
+  catch (e) { $("#ytlist").innerHTML = `<div class="errbox">${esc(e.message)}</div>`; }
+}
+
+async function ytExtract() {
+  const url = $("#yturl").value.trim();
+  if (!url || ytBusy) return;
+  ytBusy = true;
+  $("#ytgo").disabled = true;
+  $("#ytmsg").innerHTML = `<div class="empty">분석 중… 자막을 받고 규칙을 뽑는 데
+    수십 초 걸립니다.</div>`;
+  try {
+    const s = await api("/api/youtube/extract", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({url, overwrite: $("#ytover").checked})});
+    ytOpen.add(s.strategy_name);
+    $("#yturl").value = "";
+    $("#ytmsg").innerHTML = `<div class="empty">저장했습니다 — <b>${esc(s.strategy_name)}</b>.
+      꺼진 상태입니다. 내용을 확인하고 켜세요.</div>`;
+  } catch (e) {
+    $("#ytmsg").innerHTML = `<div class="errbox">${esc(e.message)}</div>`;
+  } finally {
+    ytBusy = false;
+    await refreshYoutube();
+  }
+}
+
+async function ytToggle(name, on) {
+  try {
+    await api(`/api/youtube/strategies/${encodeURIComponent(name)}/enable`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({on})});
+    $("#ytmsg").innerHTML = "";
+  } catch (e) { $("#ytmsg").innerHTML = `<div class="errbox">${esc(e.message)}</div>`; }
+  await refreshYoutube();
+}
+
+async function ytDelete(name) {
+  if (!confirm(`${name} 전략을 삭제할까요? 되돌릴 수 없습니다.`)) return;
+  try {
+    await api(`/api/youtube/strategies/${encodeURIComponent(name)}`, {method: "DELETE"});
+    ytOpen.delete(name);
+  } catch (e) { $("#ytmsg").innerHTML = `<div class="errbox">${esc(e.message)}</div>`; }
+  await refreshYoutube();
 }
 
 /* ───────── 갱신 ───────── */
@@ -914,6 +1092,7 @@ async function refresh() {
 }
 
 refresh();
+refreshYoutube();
 </script>
 </body>
 </html>
