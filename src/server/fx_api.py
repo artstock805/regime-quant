@@ -37,6 +37,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from ..config import load_config
+from ..fx import broker
 from ..fx import watchlist as fx_watchlist
 from ..fx import (
     DEFAULT_PROVIDER, MT5Error, available_symbols, bars, catalogue, resolve,
@@ -99,11 +100,16 @@ def fx_status() -> dict[str, Any]:
 
     # 포지션에 트레이딩뷰 심볼을 붙여 화면이 차트를 바로 띄울 수 있게 한다
     pairs = {p.mt5: p for p in _pairs(st["provider"])}
+    # 열린 포지션에 "어떤 전략으로 들어갔나"를 붙인다. 장부는 포지션이 있을 때만 읽는다.
+    idx = _journal_index() if st["positions"] else {}
     for pos in st["positions"]:
         p = pairs.get(pos["symbol"])
         if p:
             pos["tradingview"] = p.tradingview
             pos["display"] = p.display
+        comment = str(pos.get("comment") or "").strip()
+        order = idx.get(str(pos.get("ticket") or "")) or idx.get(comment)
+        pos.update(_entry_info(order, comment))
     return st
 
 
@@ -353,6 +359,23 @@ def _journal_index() -> dict[str, dict]:
     return idx
 
 
+def _entry_info(order: dict | None, comment: str = "") -> dict[str, Any]:
+    """
+    이 포지션이 **어떤 전략으로, 어느 군에서** 열렸는가.
+
+    전략 목록은 진입할 때 장부에 남긴 것이다(engine.entry_votes). 우리 장부에 없는
+    거래 — 남의 앱·사람 손, 또는 이 기록을 남기기 전에 연 것 — 는 모른다.
+    모르는 것을 비워 둔다. 지금의 가중치로 추측해 채우면 그때의 이유가 아니다.
+    """
+    votes = (order or {}).get("strategies") or []
+    return {
+        "strategies": votes,
+        # CSV 와 좁은 화면용 한 줄. 기여도 큰 순.
+        "strategy_names": " + ".join(str(v.get("korean") or v.get("strategy")) for v in votes),
+        "group": broker.group_of({"comment": comment}) if order else None,
+    }
+
+
 def _r_multiple(t: dict, order: dict | None) -> float | None:
     """
     이 거래가 몇 R 이었나. 손절 폭을 1R 로 본다.
@@ -401,6 +424,7 @@ def _enriched(days: int) -> tuple[list[dict], dict]:
         t["score"] = order.get("score") if order else None
         t["regime"] = order.get("regime") if order else None
         t["stop_loss"] = order.get("stop_loss") if order else None
+        t.update(_entry_info(order, t["comment"]))
         # parse 는 브로커 심볼을 통화쌍으로 읽고, FX 가 아니면 None 을 준다.
         # 계좌에는 사람이 손으로 연 금·지수 거래가 섞여 있으므로 그 경우
         # 브로커 이름을 그대로 보여 주고 차트 링크는 달지 않는다.
@@ -601,6 +625,7 @@ CSV_COLUMNS = [
     ("stop_loss", "손절가"), ("profit", "순손익"), ("gross", "총손익"),
     ("commission", "수수료"), ("swap", "스왑"), ("r_multiple", "R배수"),
     ("held_minutes", "보유분"), ("regime", "국면"), ("score", "점수"),
+    ("strategy_names", "진입전략"), ("group", "투표군"),
     ("source", "출처"), ("closed_by", "청산한앱"), ("position_id", "포지션ID"),
 ]
 

@@ -14,6 +14,54 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+# ─── 테스트는 실제 계좌에 닿지 않는다 ────────────────────────────
+#
+# 실제로 있었던 일이다. 엔진을 start() 로 켜는 테스트가 루프 스레드를 남겼고,
+# 테스트가 끝나 가짜 브로커가 걷히자 그 스레드가 **진짜 MT5 를 상대로** 28종목
+# 한 바퀴를 돌았다(running=True 인 채로). MT5 가 없는 PC 에서는 MT5Error 로
+# 끝나 아무도 몰랐고, 터미널이 깔린 PC 에서 전체 테스트가 정시를 넘길 때마다
+# 멈춘 것처럼 보이면서 드러났다. 그때 진입 신호가 났다면 테스트가 주문을 냈다.
+#
+# 두 겹으로 막는다.
+#   1) 테스트 세션 전체에서 실제 MT5 모듈을 못 쓰게 한다. 새는 스레드가 생겨도
+#      계좌에 닿지 못한다. 가짜 MT5 가 필요한 테스트는 자기가 갈아 끼운다.
+#   2) 테스트가 켠 엔진 루프는 그 테스트가 끝날 때 멈춘다.
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_real_mt5():
+    from src.fx import broker, mt5
+
+    def blocked():
+        raise mt5.MT5Error("테스트에서는 실제 MT5 를 쓰지 않는다")
+
+    patch = pytest.MonkeyPatch()
+    patch.setattr(mt5, "_mt5", blocked)
+    patch.setattr(broker, "_mt5", blocked)     # broker 는 이름을 따로 들고 있다
+    yield
+    patch.undo()
+
+
+@pytest.fixture(autouse=True)
+def _stop_engine_loops(monkeypatch):
+    from src.fx import engine
+
+    started: list = []
+    spawn = engine.FxTrader._spawn
+
+    def tracked(self):
+        started.append(self)
+        return spawn(self)
+
+    monkeypatch.setattr(engine.FxTrader, "_spawn", tracked)
+    yield
+    for trader in started:
+        trader.state.running = False
+        trader._stop.set()
+        thread = trader._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+
+
 def make_candles(
     n: int, interval: str = "5min", start: str = "2026-01-01", seed: int = 0,
     derivatives: bool = True,

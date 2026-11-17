@@ -323,3 +323,91 @@ def test_the_trader_registry_shares_the_guard_and_journal(monkeypatch, tmp_path)
     assert {t.group.name for t in eng.traders()} == {"main", "short"}
     with pytest.raises(KeyError):
         eng.trader("nope")
+
+
+# ─── 어떤 전략으로 들어갔는가 ────────────────────────────────────
+
+def vote(name, contribution, *, voice=True, weight=1.0):
+    from src.live.signals import StrategyVote
+    direction = (contribution > 0) - (contribution < 0)
+    return StrategyVote(strategy=name, korean=f"{name} 한글", direction=direction,
+                        strength=abs(contribution), weight=weight if voice else 0.0,
+                        contribution=contribution if voice else 0.0, has_voice=voice)
+
+
+def with_votes(sig, *votes):
+    sig.votes = list(votes)
+    return sig
+
+
+def test_entry_votes_keep_only_the_strategies_that_pushed_this_way():
+    sig = with_votes(Signal("롱진입", 1),
+                     vote("small", 0.2), vote("big", 0.7),
+                     vote("against", -0.4),             # 반대했다
+                     vote("silent", 0.0),               # 말이 없었다
+                     vote("no_voice", 0.9, voice=False))  # 발언권이 없다
+    got = eng.entry_votes(sig)
+    assert [v["strategy"] for v in got] == ["big", "small"]        # 기여도 큰 순
+    assert got[0] == {"strategy": "big", "korean": "big 한글", "weight": 1.0,
+                      "strength": 0.7, "contribution": 0.7}
+
+
+def test_entry_votes_follow_the_direction_of_a_short_entry():
+    sig = with_votes(Signal("숏진입", -1, stop=1.1050, target=1.0900),
+                     vote("bear", -0.6), vote("bull", 0.5))
+    assert [v["strategy"] for v in eng.entry_votes(sig)] == ["bear"]
+
+
+def test_a_signal_without_votes_records_an_empty_list():
+    """옛 형태의 신호나 대역에는 votes 가 없다. 그렇다고 진입이 터지면 안 된다."""
+    assert eng.entry_votes(Signal("롱진입", 1)) == []
+
+
+def test_the_order_is_journalled_with_the_strategies_behind_it(desk):
+    main, short, _, drive = desk
+    drive(main, with_votes(Signal("롱진입", 1), vote("donchian", 0.5), vote("ema", 0.3)))
+    drive(short, with_votes(Signal("롱진입", 1), vote("yt_quarter", 0.5)))
+    orders = {r.get("group", "main"): r
+              for r in main.journal.tail(50) if r["kind"] == "order"}
+    assert [v["strategy"] for v in orders["main"]["strategies"]] == ["donchian", "ema"]
+    assert [v["strategy"] for v in orders["short"]["strategies"]] == ["yt_quarter"]
+
+
+def test_entry_info_says_unknown_when_the_journal_has_no_record():
+    """남의 앱·사람이 연 거래, 또는 이 기록을 남기기 전에 연 것. 추측해서 채우지 않는다."""
+    from src.server.fx_api import _entry_info
+    assert _entry_info(None, "rqEURUSD2506011200") == \
+        {"strategies": [], "strategy_names": "", "group": None}
+    assert _entry_info({"ticket": 1}, "rqEURUSD2506011200") == \
+        {"strategies": [], "strategy_names": "", "group": "main"}
+
+
+def test_entry_info_names_the_strategies_and_the_group():
+    from src.server.fx_api import _entry_info
+    order = {"strategies": [{"strategy": "a", "korean": "가", "contribution": 0.5},
+                            {"strategy": "b", "korean": "", "contribution": 0.2}]}
+    info = _entry_info(order, "rqs.EURUSD2506011200")
+    assert info["strategy_names"] == "가 + b" and info["group"] == "short"
+    assert [v["strategy"] for v in info["strategies"]] == ["a", "b"]
+
+
+def test_open_positions_show_the_strategies_that_opened_them(client, desk, monkeypatch):
+    from src.server import fx_api
+    c, main, short = client
+    _, _, book, drive = desk
+    for t in (main, short):
+        t.state.running = True
+    drive(main, with_votes(Signal("롱진입", 1), vote("donchian", 0.5)))
+    drive(short, with_votes(Signal("롱진입", 1), vote("yt_quarter", 0.4)))
+    stranger = {"ticket": 999, "symbol": "GOLD", "side": "LONG", "comment": "", "magic": 0}
+
+    monkeypatch.setattr(fx_api, "mt5_status", lambda: {
+        "connected": True, "account": {}, "message": "",
+        "positions": [dict(p) for p in book.live.values()] + [stranger]})
+    monkeypatch.setattr(fx_api, "_pairs", lambda provider=None: [])
+
+    shown = {p["ticket"]: p for p in c.get("/api/fx/status").json()["positions"]}
+    by_group = {p["group"]: p for p in shown.values() if p["group"]}
+    assert by_group["main"]["strategy_names"] == "donchian 한글"
+    assert by_group["short"]["strategy_names"] == "yt_quarter 한글"
+    assert shown[999]["strategies"] == [] and shown[999]["group"] is None

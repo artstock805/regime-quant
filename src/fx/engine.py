@@ -131,6 +131,31 @@ SHORT = Group("short", broker.SHORT_CODE, "단기 군")
 GROUPS = {g.name: g for g in (MAIN, SHORT)}
 
 
+def entry_votes(sig: Any) -> list[dict]:
+    """
+    이 진입에 **찬성한 전략과 기여도.** 기여도가 큰 순이다 — 첫 줄이 이 진입을
+    가장 세게 민 전략이다.
+
+    진입은 한 전략이 아니라 투표가 정한다. 그래서 "어떤 전략으로 들어갔나"의 답은
+    목록이다. 발언권이 있고(가중치 > 0) 진입 방향과 같은 쪽으로 말한 것만 담는다.
+    반대하거나 침묵한 전략, 발언권이 없는 전략은 이 진입의 이유가 아니다.
+
+    기여도는 가중치 × 확신도 × 방향이다. 엔진이 확신도를 백분위로 보정하면
+    (calibrate_strength) 실제 점수에 들어간 값과 조금 다를 수 있다. 순서를 읽는
+    데 쓰고, 합이 점수와 정확히 맞는다고 읽지 않는다.
+    """
+    direction = int(getattr(sig, "direction", 0) or 0)
+    out = []
+    for vote in getattr(sig, "votes", None) or []:
+        contribution = float(vote.contribution)
+        if not vote.has_voice or contribution * direction <= 0:
+            continue
+        out.append({"strategy": vote.strategy, "korean": vote.korean,
+                    "weight": float(vote.weight), "strength": float(vote.strength),
+                    "contribution": round(contribution, 4)})
+    return sorted(out, key=lambda row: -abs(row["contribution"]))
+
+
 class _GroupJournal:
     """장부에 군 이름을 붙여 쓴다. 두 군이 한 장부를 쓰므로 누가 한 일인지 남아야 한다."""
 
@@ -546,7 +571,10 @@ class FxTrader:
         }
         row = {**fill.as_dict(), "canonical": pair.canonical,
                "tradingview": pair.tradingview, "score": sig.score,
-               "regime": sig.regime}
+               "regime": sig.regime,
+               # 이 진입을 만든 전략들. 진입하는 순간에 남겨야 한다 — 가중치는
+               # 매 바퀴 다시 계산되므로 나중에는 그때의 투표를 되살릴 수 없다.
+               "strategies": entry_votes(sig)}
         self.state.opened.append(row)
         self.journal.write("order", **row)
 
