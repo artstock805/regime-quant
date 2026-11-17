@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from ..config import load_config
 from ..youtube import PREFIX, pipeline, store
-from ..youtube.strategy import YoutubeStrategy
+from ..youtube.strategy import YoutubeStrategy, timeframe_mode
 
 router = APIRouter()
 
@@ -46,9 +46,11 @@ def _view(record: dict, engine_interval: str) -> dict[str, Any]:
         "enabled": record["enabled"],
         "source_url": record["source_url"],
         "created_at": record["created_at"],
-        # 영상의 봉 주기와 엔진이 도는 봉 주기가 다르면 지표 기간의 뜻이 달라진다.
-        # 막지는 않고 화면이 알려 준다.
-        "timeframe_mismatch": spec["timeframe"] != engine_interval,
+        # 영상의 봉을 엔진의 봉 위에서 어떻게 다루는지:
+        #   same         그대로 (같은 봉이거나 영상이 봉을 말하지 않았다)
+        #   resampled    영상 봉이 더 길다 — 엔진 봉을 묶어서 영상 봉으로 계산한다
+        #   unsupported  영상 봉이 더 짧다 — 계산할 수 없어 켜도 투표하지 않는다
+        "timeframe_mode": timeframe_mode(spec["timeframe"], engine_interval),
     }
 
 

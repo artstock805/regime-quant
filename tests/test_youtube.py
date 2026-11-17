@@ -557,12 +557,117 @@ def test_another_web_page_cannot_switch_a_strategy_on(client, cfg):
     assert store.get("sma_trend", cfg)["enabled"] is False
 
 
-def test_a_timeframe_mismatch_is_flagged(client, cfg):
-    store.save(raw_spec(strategy_name="four_hour", timeframe="4h"), URL, cfg=cfg)
-    store.save(raw_spec(strategy_name="one_hour", timeframe="1h"), URL, cfg=cfg)
-    flags = {s["strategy_name"]: s["timeframe_mismatch"]
+def test_the_screen_is_told_how_each_timeframe_is_handled(client, cfg):
+    for name, tf in [("four_hour", "4h"), ("one_hour", "1h"),
+                     ("five_min", "5m"), ("unspoken", None)]:
+        store.save(raw_spec(strategy_name=name, timeframe=tf), URL, cfg=cfg)
+    modes = {s["strategy_name"]: s["timeframe_mode"]
              for s in client.get("/api/youtube/strategies").json()["strategies"]}
-    assert flags == {"four_hour": True, "one_hour": False}
+    assert modes == {"four_hour": "resampled", "one_hour": "same",
+                     "five_min": "unsupported", "unspoken": "same"}
+
+
+# ─── 영상이 말한 시간봉으로 계산한다 ─────────────────────────────
+
+RISING = {"long": "close > prev_close", "short": ""}
+
+
+def on_4h(hold_bars: int = 1) -> YoutubeStrategy:
+    return strategy(hold_bars=hold_bars, timeframe="4h", indicators_needed=[],
+                    entry_conditions=RISING)
+
+
+def test_a_four_hour_strategy_is_judged_on_four_hour_bars():
+    # 1시간봉 12개 = 4시간봉 3개 (종가 10 → 20 → 30)
+    df = bars([10, 10, 10, 10,   11, 12, 13, 20,   21, 22, 23, 30])
+    out = on_4h().generate(df, df)
+    # 두 번째 4시간봉은 07시 봉이 닫혀야 완성된다 → 거기서부터 롱.
+    # 1시간봉으로 봤다면 04시부터 매 봉 롱이었을 것이다.
+    assert out["direction"].tolist() == [0] * 7 + [1] * 5
+    one_hour = strategy(hold_bars=1, timeframe="1h", indicators_needed=[],
+                        entry_conditions=RISING).generate(df, df)
+    assert one_hour["direction"].tolist() == [0, 0, 0, 0] + [1] * 8
+
+
+def test_an_unfinished_higher_bar_is_not_used():
+    """
+    두 번째 4시간봉이 아직 세 시간치뿐이다. 그 봉의 '종가'는 아직 없다 —
+    지금까지의 값으로 판단하면 봉이 닫힐 때 답이 바뀐다.
+    """
+    df = bars([10, 10, 10, 10,   11, 12, 13])
+    assert (on_4h().generate(df, df)["direction"] == 0).all()
+
+
+def test_the_hold_is_counted_in_the_videos_bars():
+    # 4시간봉 종가 10 → 20 → 20 → 20: 두 번째 봉에서만 조건이 참
+    df = bars([10] * 4 + [11, 12, 13, 20] + [20] * 8)
+    out = on_4h(hold_bars=2).generate(df, df)
+    # 4시간봉 두 개(8시간) 동안 유지한다. 1시간봉 두 개가 아니다.
+    assert out["direction"].tolist() == [0] * 7 + [1] * 8 + [0]
+
+
+@pytest.mark.parametrize("timeframe", ["4h", "1d"])
+def test_higher_timeframe_signals_never_look_ahead(timeframe):
+    """뒤를 잘라 다시 계산해도 앞부분이 같아야 한다 — 묶는 과정에서 미래가 새면 안 된다."""
+    df = make_candles(900, "1h", derivatives=False)
+    s = strategy(hold_bars=3, timeframe=timeframe, indicators_needed=[
+        {"name": "EMA", "params": {"period": 5}}, {"name": "RSI", "params": {"period": 5}}],
+        entry_conditions={"long": "close > ema_5 and rsi_5 > 55",
+                          "short": "close < ema_5 and rsi_5 < 45"})
+    full = s.generate(df, df)
+    assert (full["direction"] != 0).any()
+    for cut in (301, 502, 643, 899):                    # 긴 봉 중간에서 자른다
+        part = s.generate(df.iloc[:cut], df.iloc[:cut])
+        pd.testing.assert_frame_equal(part, full.iloc[:cut])
+
+
+def test_a_video_that_names_no_timeframe_uses_the_engine_bars():
+    df = make_candles(400, "1h", derivatives=False)
+    unspoken = strategy(timeframe=None).generate(df, df)
+    one_hour = strategy(timeframe="1h").generate(df, df)
+    pd.testing.assert_frame_equal(unspoken, one_hour)
+    assert spec.normalize(raw_spec(timeframe=None))["timeframe"] is None
+
+
+def test_a_shorter_timeframe_than_the_bars_stays_silent():
+    """1시간봉으로는 5분봉 조건을 계산할 수 없다. 엉뚱한 봉으로 답하지 않는다."""
+    df = make_candles(400, "1h", derivatives=False)
+    out = strategy(timeframe="5m", entry_conditions=RISING).generate(df, df)
+    assert (out["direction"] == 0).all()
+
+
+def test_the_engine_leaves_out_strategies_it_cannot_compute(tmp_path):
+    raw = {"youtube": {"dir": str(tmp_path / "yt")}, "fx": {"interval": "1h"}}
+    cfg = Config(raw)
+    for name, tf in [("five_min", "5m"), ("four_hour", "4h"), ("unspoken", None)]:
+        store.save(raw_spec(strategy_name=name, timeframe=tf), URL, cfg=cfg)
+        store.set_enabled(name, True, cfg)
+    names = {s.name for s in trader_with(raw, tmp_path).strategies()}
+    assert {"yt_four_hour", "yt_unspoken"} <= names
+    assert "yt_five_min" not in names
+
+    # 엔진 봉을 낮추면 들어온다
+    low = {**raw, "fx": {"interval": "5m"}}
+    assert "yt_five_min" in {s.name for s in trader_with(low, tmp_path).strategies()}
+
+
+# ─── 영상이 말하지 않은 방향은 만들지 않는다 ─────────────────────
+
+def test_a_long_only_video_stays_long_only():
+    """롱만 설명한 영상에서 숏을 뒤집어 만들면 그건 영상의 전략이 아니다."""
+    one_sided = raw_spec(entry_conditions={"long": "close > sma_3", "short": ""})
+    out = spec.parse(json.dumps(one_sided))
+    assert out["entry_conditions"] == {"long": "close > sma_3", "short": ""}
+
+    df = make_candles(400, "1h", derivatives=False)
+    signals = YoutubeStrategy(out).generate(df, df)
+    assert (signals["direction"] >= 0).all()
+
+
+def test_the_prompt_forbids_inventing_the_other_side():
+    prompt = pipeline.SYSTEM_PROMPT
+    assert "전혀 언급하지 않으면" in prompt and "지어내거나 뒤집어 만들지 않는다" in prompt
+    assert "언급했을 때만 대칭으로" in prompt
 
 
 def test_the_main_app_serves_the_youtube_routes():

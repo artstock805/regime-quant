@@ -16,6 +16,26 @@
 hold_bars 봉 동안 그 방향을 유지하고, 그 사이 반대 조건이 참이 되면 뒤집는다.
 같은 봉에서 롱·숏 조건이 함께 참이면 판단하지 않는다.
 
+**영상이 말한 시간봉으로 계산한다.** 영상이 "4시간봉 전략"이라고 했으면 조건을
+4시간봉 위에서 본다. 엔진은 자기 봉(fx.interval, 기본 1시간)으로 돌기 때문에,
+받은 봉을 영상의 봉으로 묶어서(리샘플) 계산한 뒤 엔진 봉으로 되돌린다.
+
+    · 영상 봉 = 엔진 봉      그대로 계산한다
+    · 영상 봉이 더 길다      묶어서 계산한다. hold_bars 도 **영상 봉** 기준이다
+    · 영상 봉이 더 짧다      **적용할 수 없다.** 1시간봉으로는 5분봉 조건을 계산할 수
+                             없다. 엉뚱한 봉으로 돌리지 않고 투표에서 뺀다
+    · 영상이 말하지 않았다   엔진 봉을 쓴다 (timeframe 이 null)
+
+**긴 봉의 판단은 그 봉이 닫힌 뒤에만 쓴다.** 4시간봉 T(00:00~04:00)의 종가는
+03:00 에 열린 1시간봉이 닫혀야 정해진다. 그 값을 00:00 봉에 붙이면 세 시간
+뒤의 가격으로 진입하는 백테스트가 된다. 그래서 T 의 판단을 T+3h 봉에 놓고,
+다음 긴 봉이 닫힐 때까지 그 상태를 이어 간다. 아직 다 차지 않은 마지막 긴 봉은
+쓰지 않는다.
+
+긴 봉의 경계는 UTC 기준이다(4시간봉 = 0·4·8시…, 일봉 = UTC 자정). 브로커의
+4시간봉·일봉은 서버 시간(GMT+2/+3) 기준이라 경계가 2~3시간 어긋난다. 영상이
+본 차트와 봉 모양이 조금 다를 수 있다.
+
 **확신도는 1 로 고정이다.** 규칙이 참/거짓뿐이라 강약이 없다. 엔진이
 calibrate_strength(FX 기본값)를 켜면 확신도를 자기 분포의 백분위로 바꾸는데,
 전부 같은 값의 백분위는 약 0.5 다(실측 0.501). 즉 이 전략의 한 표는
@@ -32,7 +52,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from ..config import Config
+from ..config import Config, load_config
 from ..regime import ALL_REGIMES
 from ..strategies.base import Strategy, empty_signals
 from . import indicators, store
@@ -40,6 +60,48 @@ from .expr import evaluate, names_in
 
 logger = logging.getLogger(__name__)
 PREFIX = "yt_"
+
+MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+_OHLCV = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+
+SAME, RESAMPLED, UNSUPPORTED = "same", "resampled", "unsupported"
+
+
+def timeframe_mode(timeframe: str | None, base: str) -> str:
+    """
+    영상의 봉(timeframe)을 엔진의 봉(base) 위에서 어떻게 다룰지.
+
+        same         그대로 계산 (같은 봉이거나 영상이 봉을 말하지 않았다)
+        resampled    영상 봉이 더 길다 — 묶어서 계산
+        unsupported  영상 봉이 더 짧거나 배수가 아니다 — 계산할 수 없다
+    """
+    if timeframe is None:
+        return SAME
+    want, have = MINUTES.get(timeframe), MINUTES.get(base)
+    if want is None or have is None:
+        return UNSUPPORTED
+    if want == have:
+        return SAME
+    return RESAMPLED if want > have and want % have == 0 else UNSUPPORTED
+
+
+def _step_minutes(index: pd.Index) -> int | None:
+    """봉 간격(분). 주말 공백이 있어도 중앙값은 정상 간격이다."""
+    if not isinstance(index, pd.DatetimeIndex) or len(index) < 3:
+        return None
+    step = index.to_series().diff().median()
+    return int(step.total_seconds() // 60) if pd.notna(step) else None
+
+
+def _resample(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
+    """
+    더 긴 봉으로 묶는다. 라벨은 봉이 **여는 시각**이다 (src/data/resample.py 와 같은
+    규칙). origin 을 epoch 로 고정해야 데이터가 어디서 시작하든 경계가 같다 —
+    엔진이 받아 오는 창은 매 바퀴 한 봉씩 밀린다.
+    """
+    out = df[list(_OHLCV)].resample(f"{minutes}min", label="left", closed="left",
+                                    origin="epoch").agg(_OHLCV)
+    return out.dropna(subset=["close"])
 
 
 class YoutubeStrategy(Strategy):
@@ -70,12 +132,35 @@ class YoutubeStrategy(Strategy):
         합성 봉으로 한 번 돌려 보지만(spec.validate) 실제 봉은 다를 수 있다.
         """
         try:
-            return self._compute(df)
+            direction = self._direction(df)
         except Exception:
             logger.exception("%s: 신호 계산 실패 — 이번 봉은 기권합니다", self.name)
             return empty_signals(df.index)
+        out = empty_signals(df.index)
+        out["direction"] = direction
+        out["strength"] = (direction != 0.0).astype("float64")
+        return out
 
-    def _compute(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _direction(self, df: pd.DataFrame) -> pd.Series:
+        """받은 봉의 인덱스에 맞춘 방향(-1/0/+1). 영상의 봉으로 계산한다."""
+        have = _step_minutes(df.index)
+        want = MINUTES.get(self.spec.get("timeframe"))
+        if have is None or want is None or want == have:
+            return self._state(df)
+        if want < have or want % have:
+            # 받은 봉이 영상의 봉보다 굵다. 엔진은 이런 전략을 애초에 넣지 않는다
+            # (enabled_strategies). 다른 경로로 불렸을 때도 엉뚱한 봉으로 답하지 않는다.
+            return pd.Series(0.0, index=df.index)
+
+        state = self._state(_resample(df, want))
+        # 긴 봉 T 의 판단은 그 봉의 마지막 작은 봉(T + want - have)이 닫혀야 알 수 있다.
+        # 거기에 놓고 앞으로 채운다. 아직 다 안 찬 마지막 긴 봉은 놓일 자리가
+        # 인덱스 밖(미래)이라 저절로 빠진다.
+        known = state.set_axis(state.index + pd.Timedelta(minutes=want - have))
+        return known.reindex(df.index, method="ffill").fillna(0.0)
+
+    def _state(self, df: pd.DataFrame) -> pd.Series:
+        """조건이 참이 된 봉부터 hold_bars 봉 동안 그 방향을 유지한다."""
         cols = indicators.columns(df, self.spec["indicators_needed"])
         long = self._condition("long", cols, df.index)
         short = self._condition("short", cols, df.index)
@@ -85,15 +170,20 @@ class YoutubeStrategy(Strategy):
         trigger[short & ~long] = -1.0
         hold = int(self.params["hold_bars"])
         # ffill 은 과거 값을 앞으로 끌고 올 뿐이라 미래를 보지 않는다
-        state = (trigger.ffill(limit=hold - 1) if hold > 1 else trigger).fillna(0.0)
-
-        out = empty_signals(df.index)
-        out["direction"] = state
-        out["strength"] = (state != 0.0).astype("float64")
-        return out
+        return (trigger.ffill(limit=hold - 1) if hold > 1 else trigger).fillna(0.0)
 
 
 def enabled_strategies(cfg: Config | None = None) -> list[YoutubeStrategy]:
-    """켜 둔 유튜브 전략. 호출할 때마다 파일을 다시 읽으므로 토글이 다음 바퀴에 반영된다."""
+    """
+    엔진이 투표에 넣을 유튜브 전략. 호출할 때마다 파일을 다시 읽으므로 토글이
+    다음 바퀴에 반영된다.
+
+    켜 두었어도 **엔진의 봉으로 계산할 수 없는 전략은 뺀다** (영상 봉이 엔진 봉보다
+    짧은 경우). 넣어 봐야 기권만 하고, 화면에는 투표하는 것처럼 보인다.
+    """
+    cfg = cfg or load_config()
+    base = str(cfg.get("fx.interval", "1h"))
     return [YoutubeStrategy(record["spec"])
-            for record in store.load_all(cfg) if record["enabled"]]
+            for record in store.load_all(cfg)
+            if record["enabled"]
+            and timeframe_mode(record["spec"]["timeframe"], base) != UNSUPPORTED]

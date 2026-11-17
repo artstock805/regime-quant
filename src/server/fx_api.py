@@ -34,8 +34,10 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel
 
 from ..config import load_config
+from ..fx import watchlist as fx_watchlist
 from ..fx import (
     DEFAULT_PROVIDER, MT5Error, available_symbols, bars, catalogue, resolve,
     status as mt5_status, symbol_info, tick,
@@ -56,17 +58,24 @@ _pairs_cache: list | None = None
 
 
 def _pairs(provider: str = DEFAULT_PROVIDER):
+    """이 브로커의 FX 쌍 전부. 감시 목록은 이 안에서 고른다."""
     global _pairs_cache
     if _pairs_cache is None:
         _pairs_cache = catalogue(available_symbols(only_forex=True),
-                                 provider=provider, majors_only=True)
+                                 provider=provider)
     return _pairs_cache
 
 
 def _watchlist(cfg) -> list[str]:
-    """설정에 적힌 관심 통화쌍. 없으면 주요 통화쌍 전부."""
-    want = cfg.get("fx.symbols") or []
-    return [str(s).upper() for s in want]
+    """
+    감시 통화쌍의 표준 이름. **빈 목록은 전체**다.
+    엔진과 같은 함수를 쓴다 — 둘이 어긋나면 화면에 없는 종목에서 주문이 나간다.
+    """
+    return fx_watchlist.chosen(cfg)
+
+
+class WatchlistRequest(BaseModel):
+    symbols: list[str]
 
 
 # 화면 코드가 바뀌었는데 브라우저가 옛 파일을 들고 있으면, 고친 것이 반영되지
@@ -109,9 +118,31 @@ def fx_pairs() -> dict[str, Any]:
     watch = set(_watchlist(cfg))
     return {
         "provider": provider,
+        "all": not watch,
         "pairs": [{**p.as_dict(), "watched": (not watch) or p.canonical in watch}
                   for p in pairs],
     }
+
+
+@router.post("/api/fx/watchlist")
+def set_watchlist(req: WatchlistRequest) -> dict[str, Any]:
+    """
+    감시 통화쌍을 고른다. 전부 고르면 "전체"로 저장된다.
+
+    엔진은 매 바퀴 목록을 다시 읽으므로 다음 바퀴부터 반영된다. 목록에서 뺀
+    종목에 **열려 있는 포지션은 닫지 않는다** — 손절·목표는 브로커에 걸려 있고,
+    그 종목의 신호 청산만 더는 일어나지 않는다. 화면이 그 사실을 알려 준다.
+
+    JSON 본문만 받는다 (다른 출처의 웹페이지가 목록을 바꾸지 못하게).
+    """
+    cfg = load_config()
+    try:
+        fx_watchlist.save(req.symbols, cfg, available_symbols(only_forex=True))
+    except MT5Error as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return fx_pairs()
 
 
 @router.get("/api/fx/quotes")

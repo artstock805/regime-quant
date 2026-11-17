@@ -41,7 +41,7 @@ def report(record: dict) -> str:
         LINE,
         f" 전략명      : {spec['strategy_name']}  (엔진 이름 yt_{spec['strategy_name']})",
         f" 대상 시장   : {spec['target_market']}",
-        f" 타임프레임  : {spec['timeframe']}",
+        f" 타임프레임  : {spec['timeframe'] or '영상에 언급 없음 — 엔진 봉을 쓴다'}",
         f" 사용 지표   : {used or '(없음)'}",
         f" 롱 진입     : {spec['entry_conditions']['long'] or '(없음)'}",
         f" 숏 진입     : {spec['entry_conditions']['short'] or '(없음)'}",
@@ -76,7 +76,7 @@ def main() -> int:
             for r in records:
                 s = r["spec"]
                 print(f" {'[켜짐]' if r['enabled'] else '[꺼짐]'} {s['strategy_name']:<40} "
-                      f"{s['timeframe']:<4} {r['source_url']}")
+                      f"{s['timeframe'] or '-':<4} {r['source_url']}")
             if not records:
                 print(" 저장된 유튜브 전략이 없습니다.")
             return 0

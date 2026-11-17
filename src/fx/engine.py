@@ -44,8 +44,9 @@ from ..live.signals import SymbolSignal, signal_for
 from ..strategies import build_all
 from ..youtube import enabled_strategies as youtube_strategies
 from . import broker
+from . import watchlist as fx_watchlist
 from .mt5 import MT5Error, bars, account, positions, symbol_info
-from .symbols import Pair, catalogue, resolve
+from .symbols import Pair
 
 # 검증 결과. 화면과 장부가 같은 문장을 쓰도록 한 곳에 둔다.
 VERDICT = {
@@ -136,13 +137,13 @@ class FxTrader:
         return bool(self.cfg.get("fx.allow_live", False))
 
     def watchlist(self) -> list[Pair]:
-        want = [str(s).upper() for s in (self.cfg.get("fx.symbols") or [])]
+        """
+        감시할 통화쌍. **기본은 전체**이고 화면에서 고르면 그것만 본다
+        (src/fx/watchlist.py). 매 바퀴 다시 읽으므로 화면에서 바꾼 선택이
+        재시작 없이 다음 바퀴에 반영된다.
+        """
         from .mt5 import available_symbols
-        available = available_symbols(only_forex=True)
-        if want:
-            found = [resolve(w, available) for w in want]
-            return [p for p in found if p is not None]
-        return catalogue(available, majors_only=True)
+        return fx_watchlist.pairs(self.cfg, available_symbols(only_forex=True))
 
     def weight_params(self) -> WeightParams:
         """

@@ -4,13 +4,17 @@
     {
       "strategy_name": "rsi_ema_pullback",
       "target_market": "CRYPTO | FOREX | KR_STOCK | US_STOCK",
-      "timeframe": "1m | 5m | 15m | 1h | 4h | 1d",
+      "timeframe": "1m | 5m | 15m | 1h | 4h | 1d" 또는 null (영상이 말하지 않음),
       "indicators_needed": [{"name": "RSI", "params": {"period": 14}}],
       "entry_conditions": {"long": "수식", "short": "수식"},
       "exit_conditions": {"take_profit_pct": 0.02, "stop_loss_pct": 0.01,
                           "indicator_exit": "설명"},
       "quant_assumptions": ["모호한 표현을 어떤 수치로 정했는지"]
     }
+
+**영상이 말하지 않은 방향은 비워 둔다.** 롱만 설명한 영상에서 숏 규칙을 뒤집어
+만들면 그건 영상의 전략이 아니라 우리가 지어낸 것이다. 영상이 "숏은 반대로"라고
+말했을 때만 채운다 (pipeline 의 프롬프트가 그렇게 시킨다).
 
 **형식 검사로 끝내지 않고 실제로 한 번 돌려 본다.** 선언하지 않은 변수, 값이
 끝내 나오지 않는 긴 기간, 0 으로 나누는 수식은 형식만 봐서는 통과한다.
@@ -108,7 +112,9 @@ def normalize(raw: object) -> dict:
     return {
         "strategy_name": check_name(raw.get("strategy_name")),
         "target_market": _choice(raw.get("target_market"), "target_market", MARKETS),
-        "timeframe": _choice(raw.get("timeframe"), "timeframe", TIMEFRAMES),
+        # null = 영상이 봉 주기를 말하지 않았다. 엔진의 봉을 그대로 쓴다.
+        "timeframe": (None if raw.get("timeframe") is None
+                      else _choice(raw.get("timeframe"), "timeframe", TIMEFRAMES)),
         "indicators_needed": [_indicator(i) for i in needed],
         "entry_conditions": {s: _text(entry.get(s), f"entry_conditions.{s}")
                              for s in SIDES},

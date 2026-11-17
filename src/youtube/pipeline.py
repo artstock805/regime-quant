@@ -51,7 +51,7 @@ SYSTEM_PROMPT = f"""너는 퀀트 트레이딩 전략 분석가다. <transcript>
 {{
   "strategy_name": "영문 소문자 스네이크케이스 (3~60자, 예: rsi_ema_pullback)",
   "target_market": "{' | '.join(specs.MARKETS)}",
-  "timeframe": "{' | '.join(specs.TIMEFRAMES)} (영상이 쓰는 봉 주기. 지표 기간은 이 주기의 봉 개수로 쓴다)",
+  "timeframe": "{' | '.join(specs.TIMEFRAMES)} (영상이 쓰는 봉 주기. 지표 기간은 이 주기의 봉 개수로 쓴다. 영상이 봉 주기를 전혀 말하지 않으면 추측하지 말고 문자열 대신 null)",
   "indicators_needed": [{{"name": "RSI", "params": {{"period": 14}}}}],
   "entry_conditions": {{"long": "수식", "short": "수식"}},
   "exit_conditions": {{"take_profit_pct": 0.02, "stop_loss_pct": 0.01, "indicator_exit": "설명 문장"}},
@@ -74,7 +74,9 @@ SYSTEM_PROMPT = f"""너는 퀀트 트레이딩 전략 분석가다. <transcript>
 - 골든크로스 예: prev_ema_20 <= prev_ema_50 and ema_20 > ema_50
 - 거래량 급증 예: volume > volume_sma_20 * 2
 - 돌파 예: close > prev_highest_20
-- 영상이 한쪽 방향만 다루면 반대쪽 수식은 빈 문자열로 둔다. 적어도 한쪽은 채워야 한다.
+- 영상이 한쪽 방향(롱 또는 숏)만 설명하고 반대 방향을 전혀 언급하지 않으면, 반대쪽 수식은 빈 문자열로 둔다. 지어내거나 뒤집어 만들지 않는다.
+- 영상이 "숏은 반대로 하면 된다"처럼 반대 방향을 언급했을 때만 대칭으로 뒤집어 채우고, 그렇게 했다는 사실을 quant_assumptions 에 적는다.
+- 적어도 한쪽은 채워야 한다.
 
 그 밖의 규칙:
 - 비율은 소수로 쓴다 (2% -> 0.02). 영상에 익절/손절 기준이 없으면 null.
