@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..config import load_config
-from ..youtube import PREFIX, pipeline, store
+from ..youtube import PREFIX, pipeline, store, validation
 from ..youtube.strategy import YoutubeStrategy, strategy_group, timeframe_mode
 
 router = APIRouter()
@@ -36,6 +36,10 @@ class ExtractRequest(BaseModel):
 
 class EnableRequest(BaseModel):
     on: bool
+
+
+class ValidateRequest(BaseModel):
+    confirm: bool
 
 
 def _view(record: dict, engine_interval: str) -> dict[str, Any]:
@@ -54,6 +58,8 @@ def _view(record: dict, engine_interval: str) -> dict[str, Any]:
         # 어느 투표 군에 들어가는지: main(기존 전략과 함께) / short(단기 전략끼리 따로
         # 투표·진입·청산) / null(적용 불가 — 1분봉 등)
         "group": strategy_group(spec["timeframe"], engine_interval),
+        # 과거 검증 결과. null 이면 아직 검증하지 않았다.
+        "validation": record.get("validation"),
     }
 
 
@@ -76,7 +82,27 @@ def youtube_strategies() -> dict[str, Any]:
         "banned": sorted(n for n in (cfg.get("fx.exclude_strategies") or [])
                          if str(n).startswith(PREFIX)),
         "strategies": [_view(r, interval) for r in store.load_all(cfg)],
+        # 지금 돌고 있는(또는 마지막으로 돈) 검증. 화면이 진행 상황을 여기서 읽는다.
+        "validation_job": validation.status(cfg),
     }
+
+
+@router.post("/api/youtube/strategies/{name}/validate")
+def youtube_validate(name: str, req: ValidateRequest) -> dict[str, Any]:
+    """
+    이 전략을 과거 봉으로 검증한다. 몇 분 걸리므로 **별도 프로세스에서 낮은
+    우선순위로** 돌리고 바로 돌아온다. 진행 상황과 결과는 전략 목록에 실려 온다.
+
+    한 번에 하나만 돈다. JSON 본문만 받는다 — 다른 출처의 웹페이지가 CPU 를
+    몇 분씩 쓰는 일을 시킬 수 없게.
+    """
+    cfg = load_config()
+    try:
+        return validation.start(name, cfg)
+    except store.StoreError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except validation.ValidationError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.post("/api/youtube/extract")

@@ -68,7 +68,10 @@ def _read(path: Path) -> dict:
     return {"spec": spec,
             "source_url": str(record.get("source_url", "")),
             "created_at": str(record.get("created_at", "")),
-            "enabled": record.get("enabled") is True}
+            "enabled": record.get("enabled") is True,
+            # 과거 검증 결과(src/youtube/validation.py). 없으면 아직 검증하지 않은 것이다.
+            "validation": (record["validation"]
+                           if isinstance(record.get("validation"), dict) else None)}
 
 
 def _write(path: Path, record: dict) -> None:
@@ -143,6 +146,22 @@ def set_enabled(name: str, enabled: bool, cfg: Config | None = None) -> dict:
         record = {**get(name, cfg), "enabled": bool(enabled)}
         _write(_path(name, cfg), record)
     return record
+
+
+def set_validation(name: str, result: dict, cfg: Config | None = None) -> bool:
+    """
+    검증 결과를 전략에 붙인다. 붙였으면 True.
+
+    검증은 몇 분이 걸린다. 그 사이 같은 이름으로 전략을 다시 분석해 덮어썼다면
+    이 결과는 **옛 전략의 성적**이다 — 새 전략에 붙이면 본 적 없는 규칙에 남의
+    성적표가 달린다. 검증을 시작할 때의 created_at 과 지금 것이 다르면 버린다.
+    """
+    with _write_lock:
+        record = get(name, cfg)
+        if record["created_at"] != result.get("spec_created_at"):
+            return False
+        _write(_path(name, cfg), {**record, "validation": result})
+    return True
 
 
 def delete(name: str, cfg: Config | None = None) -> None:

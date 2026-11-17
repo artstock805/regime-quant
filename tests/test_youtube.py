@@ -657,6 +657,159 @@ def test_the_engine_leaves_out_strategies_it_cannot_compute(tmp_path):
     assert "yt_five_min" in {s.name for s in trader_with(low, tmp_path).strategies()}
 
 
+# ─── 과거 검증 ───────────────────────────────────────────────────
+
+from src.youtube import validation  # noqa: E402
+
+
+def history(symbol, interval, count):
+    """가짜 과거 봉. MT5 봉처럼 spread 열이 있다."""
+    df = make_candles(1500, "1h", seed=sum(map(ord, symbol)), derivatives=False)
+    return df[["open", "high", "low", "close", "volume", "spread"]]
+
+
+def validated(cfg, **over) -> dict:
+    return validation.run(spec.normalize(raw_spec(**over)), cfg,
+                          symbols=[("EURUSD", "EURUSD"), ("GBPUSD", "GBPUSD")],
+                          fetch=history, point=lambda name: 0.00001)
+
+
+@pytest.fixture
+def vcfg(tmp_path) -> Config:
+    from src.config import load_config
+    raw = dict(load_config(use_local=False).raw)
+    raw["youtube"] = {"dir": str(tmp_path / "yt"),
+                      "validation_status": str(tmp_path / "status.json")}
+    return Config(raw)
+
+
+def test_validation_reports_net_and_gross_and_years(vcfg):
+    out = validated(vcfg)
+    assert out["interval"] == "1h" and out["pairs"] == 2 and out["pairs_failed"] == []
+    assert out["trades"] > validation.MIN_TRADES
+    assert out["net_r"] < out["gross_r"], "비용을 빼면 반드시 더 나빠야 한다"
+    assert out["verdict"] in {"양의우위", "음의우위", "판정불가", "표본부족"}
+    assert 0 <= out["positive_pairs"] <= 2 and 0 <= out["win_rate"] <= 1
+    assert sum(y["trades"] for y in out["by_year"]) == out["trades"]
+    assert out["from"] < out["to"]
+    json.dumps(out)                                   # 파일에 그대로 쓸 수 있어야 한다
+
+
+def test_too_few_trades_is_not_judged(vcfg):
+    """몇 건의 평균은 우연이다. 숫자를 내지 않는다."""
+    never = {"long": "close > sma_3 * 100", "short": ""}
+    out = validated(vcfg, entry_conditions=never)
+    assert out["verdict"] == "거래부족" and out["net_r"] is None and out["trades"] == 0
+
+
+def test_a_pair_without_history_is_skipped_and_reported(vcfg):
+    def flaky(symbol, interval, count):
+        if symbol == "GBPUSD":
+            raise RuntimeError("no data")
+        return history(symbol, interval, count)
+
+    out = validation.run(spec.normalize(raw_spec()), vcfg,
+                         symbols=[("EURUSD", "EURUSD"), ("GBPUSD", "GBPUSD")],
+                         fetch=flaky, point=lambda name: 0.00001)
+    assert out["pairs"] == 1 and out["pairs_failed"] == ["GBPUSD"]
+    with pytest.raises(validation.ValidationError):
+        validation.run(spec.normalize(raw_spec()), vcfg, symbols=[("GBPUSD", "GBPUSD")],
+                       fetch=flaky, point=lambda name: 0.00001)
+
+
+@pytest.mark.parametrize("timeframe, expected", [("1h", "1h"), ("4h", "1h"), ("1d", "1h"),
+                                                 (None, "1h"), ("15m", "15m"), ("5m", "5m")])
+def test_validation_uses_the_bars_the_engine_would_use(vcfg, timeframe, expected):
+    """기본 군 전략은 엔진 봉(묶어서 계산), 단기 군 전략은 자기 시간봉."""
+    assert validation.interval_for(spec.normalize(raw_spec(timeframe=timeframe)), vcfg) == expected
+
+
+def test_a_one_minute_strategy_cannot_be_validated(vcfg):
+    with pytest.raises(validation.ValidationError):
+        validation.interval_for(spec.normalize(raw_spec(timeframe="1m")), vcfg)
+
+
+def test_a_result_survives_toggling_but_not_a_rewrite(vcfg):
+    record = store.save(raw_spec(), URL, cfg=vcfg)
+    result = {"net_r": -0.05, "spec_created_at": record["created_at"]}
+    assert store.set_validation("sma_trend", result, vcfg) is True
+    store.set_enabled("sma_trend", True, vcfg)
+    assert store.get("sma_trend", vcfg)["validation"]["net_r"] == -0.05
+
+    # 다시 분석해 덮어쓰면 규칙이 달라질 수 있다 — 옛 성적표를 달고 있으면 안 된다
+    store.save(raw_spec(), URL, overwrite=True, cfg=vcfg)
+    assert store.get("sma_trend", vcfg)["validation"] is None
+
+
+def test_a_result_for_an_older_version_of_the_strategy_is_discarded(vcfg):
+    """검증은 몇 분 걸린다. 그 사이 전략이 바뀌었으면 그 결과는 옛 전략의 것이다."""
+    store.save(raw_spec(), URL, cfg=vcfg)
+    stale = {"net_r": 0.9, "spec_created_at": "2020-01-01T00:00:00+00:00"}
+    assert store.set_validation("sma_trend", stale, vcfg) is False
+    assert store.get("sma_trend", vcfg)["validation"] is None
+
+
+def test_the_child_process_entry_saves_the_result(vcfg, monkeypatch):
+    store.save(raw_spec(), URL, cfg=vcfg)
+    monkeypatch.setattr(validation, "load_config", lambda: vcfg)
+    real_run = validation.run
+    monkeypatch.setattr(validation, "run", lambda spec_, cfg, progress=None: real_run(
+        spec_, cfg, symbols=[("EURUSD", "EURUSD")], fetch=history,
+        point=lambda name: 0.00001, progress=progress))
+
+    assert validation.main(["sma_trend"]) == 0
+    saved = store.get("sma_trend", vcfg)["validation"]
+    assert saved["pairs"] == 1 and saved["trades"] > 0
+    assert validation.read_status(vcfg)["state"] == "done"
+
+    assert validation.main(["nope"]) == 1
+    assert validation.read_status(vcfg)["state"] == "failed"
+
+
+def test_only_one_validation_runs_at_a_time(vcfg, monkeypatch):
+    class Alive:
+        def poll(self):
+            return None
+
+    store.save(raw_spec(), URL, cfg=vcfg)
+    spawned = []
+    monkeypatch.setattr(validation, "_process", None)
+    monkeypatch.setattr(validation, "spawn", lambda name: spawned.append(name) or Alive())
+
+    assert validation.start("sma_trend", vcfg)["state"] == "running"
+    with pytest.raises(validation.ValidationError, match="이미"):
+        validation.start("sma_trend", vcfg)
+    assert spawned == ["sma_trend"]
+    assert validation.status(vcfg)["state"] == "running"
+
+
+def test_a_dead_process_is_not_reported_as_running_forever(vcfg, monkeypatch):
+    monkeypatch.setattr(validation, "_process", None)
+    validation.write_status(vcfg, name="sma_trend", state="running", done=3, total=28)
+    seen = validation.status(vcfg)
+    assert seen["state"] == "failed" and "끝났습니다" in seen["error"]
+
+
+def test_the_validate_endpoint_needs_a_json_body(client, cfg, monkeypatch):
+    from src.server import youtube_api
+    started = []
+    monkeypatch.setattr(youtube_api.validation, "start",
+                        lambda name, cfg_: started.append(name) or {"state": "running"})
+    monkeypatch.setattr(youtube_api.validation, "status", lambda cfg_: {"state": "idle"})
+    store.save(raw_spec(), URL, cfg=cfg)
+    path = "/api/youtube/strategies/sma_trend/validate"
+
+    assert client.post(path).status_code == 422               # 다른 출처가 보낼 수 있는 형태
+    assert client.post(path, data={"confirm": "true"}).status_code == 422
+    assert started == []
+    assert client.post(path, json={"confirm": True}).json() == {"state": "running"}
+    assert started == ["sma_trend"]
+
+    listed = client.get("/api/youtube/strategies").json()
+    assert listed["validation_job"] == {"state": "idle"}
+    assert listed["strategies"][0]["validation"] is None
+
+
 # ─── 영상이 말하지 않은 방향은 만들지 않는다 ─────────────────────
 
 def test_a_long_only_video_stays_long_only():
