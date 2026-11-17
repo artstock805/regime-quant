@@ -236,6 +236,19 @@ live:
   # scripts/signals.py --universe runs/universe_final.json
   symbols: []
 
+# 유튜브 전략 — 영상에서 뽑은 진입 규칙을 FX 엔진의 투표에 넣는다.
+# (FX 상황판의 "유튜브 전략" 카드, scripts/youtube_strategy.py)
+#
+# 켠 전략도 발언권은 최근 학습 구간 성적이 정한다. 빼고 싶은 전략은 화면에서
+# 끄거나 fx.exclude_strategies 에 yt_<이름> 을 적는다.
+# API 키는 여기 적지 않는다 — 환경변수 GEMINI_API_KEY 또는 OPENAI_API_KEY.
+youtube:
+  # 전략 하나가 JSON 파일 하나. runs/ 는 git 에서 제외된다.
+  dir: "runs/youtube"
+  gemini_model: "gemini-3.8-flash"
+  openai_model: "gpt-4o-mini"
+  whisper_model: "whisper-1"
+
 # 실전 투입 합격 기준. out-of-sample 구간에서 전부 통과해야 페이퍼로 넘어간다
 acceptance:
   min_sharpe: 1.0

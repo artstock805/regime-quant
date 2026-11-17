@@ -33,6 +33,7 @@ from .home import router as home_router
 from .book_api import router as book_router
 from .fx_api import router as fx_router
 from .live_api import router as live_router
+from .youtube_api import router as youtube_router
 from .session import Session, build_session, first_traded_bar
 
 STATIC = Path(__file__).parent / "static"
@@ -69,6 +70,7 @@ app.include_router(fx_router)
 app.include_router(live_router)
 app.include_router(home_router)
 app.include_router(book_router)
+app.include_router(youtube_router)
 
 
 @app.get("/")

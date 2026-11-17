@@ -42,6 +42,7 @@ from ..execution.journal import Journal
 from ..indicators import compute_all
 from ..live.signals import SymbolSignal, signal_for
 from ..strategies import build_all
+from ..youtube import enabled_strategies as youtube_strategies
 from . import broker
 from .mt5 import MT5Error, bars, account, positions, symbol_info
 from .symbols import Pair, catalogue, resolve
@@ -202,6 +203,11 @@ class FxTrader:
             if s.name in banned:
                 continue
             out.append(s)
+        # 화면에서 켠 유튜브 전략. **허용목록(fx.strategies)은 적용하지 않는다** —
+        # 켜는 것 자체가 사람의 선택이고, 허용목록에 이름을 또 적게 하면 켜 놓고도
+        # 조용히 빠진다. 금지목록은 그대로 이긴다. 매 바퀴 저장소를 다시 읽으므로
+        # 토글이 재시작 없이 반영된다.
+        out.extend(s for s in youtube_strategies(self.cfg) if s.name not in banned)
         return out
 
     # ─── 시작·정지 ───────────────────────────────────────────────

@@ -9,8 +9,16 @@ PyYAML>=6.0
 fastapi>=0.110
 uvicorn[standard]>=0.29
 
+# 유튜브 전략 (FX 상황판의 "유튜브 전략" 카드, scripts/youtube_strategy.py).
+# 없어도 상황판과 엔진은 정상 동작한다 — 영상을 분석할 때만 임포트한다.
+youtube-transcript-api>=1.2
+yt-dlp
+google-genai>=1.0        # GEMINI_API_KEY 를 쓸 때
+# openai                 # OPENAI_API_KEY 를 쓸 때
+
 # 테스트 (메뉴 [8])
 pytest>=8.0
+httpx>=0.27              # FastAPI TestClient 가 쓴다
 
 # 지표 구현 대조용 기준 라이브러리.
 # tests/test_reference_parity.py 가 이것과 0.000% 일치를 요구한다.
