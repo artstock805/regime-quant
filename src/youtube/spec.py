@@ -4,7 +4,7 @@
     {
       "strategy_name": "rsi_ema_pullback",
       "target_market": "CRYPTO | FOREX | KR_STOCK | US_STOCK",
-      "timeframe": "1m | 5m | 15m | 1h | 4h | 1d" 또는 null (영상이 말하지 않음),
+      "timeframe": "1m | 5m | 15m | 30m | 1h | 4h | 1d" 또는 null (영상이 말하지 않음),
       "indicators_needed": [{"name": "RSI", "params": {"period": 14}}],
       "entry_conditions": {"long": "수식", "short": "수식"},
       "exit_conditions": {"take_profit_pct": 0.02, "stop_loss_pct": 0.01,
@@ -40,7 +40,7 @@ from .expr import evaluate, names_in
 
 NAME = re.compile(r"^[a-z][a-z0-9_]{2,59}$")
 MARKETS = ("CRYPTO", "FOREX", "KR_STOCK", "US_STOCK")
-TIMEFRAMES = ("1m", "5m", "15m", "1h", "4h", "1d")
+TIMEFRAMES = ("1m", "5m", "15m", "30m", "1h", "4h", "1d")
 SIDES = ("long", "short")
 # 검증용 합성 봉 개수. 엔진은 학습 구간(기본 6개월)+워밍업을 받아 오므로
 # 1시간봉이면 4,000봉쯤 된다. MAX_PERIOD(1000) 를 넉넉히 덮으면 충분하다.

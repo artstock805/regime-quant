@@ -289,6 +289,12 @@
     </div>
 
     <div class="card">
+      <h3>단기 자동매매 <span style="text-transform:none;color:var(--faint);
+        font-weight:400">1시간봉 미만 전략</span></h3>
+      <div id="shortengine"><div class="empty">확인 중…</div></div>
+    </div>
+
+    <div class="card">
       <h3>유튜브 전략 <span style="text-transform:none;color:var(--faint);
         font-weight:400">투표 후보</span></h3>
       <div id="ytkey"></div>
@@ -858,10 +864,13 @@ $("#histtoggle").onclick = () => {
    사용자는 검증된 것을 돌리고 있다고 착각한다. 버튼 위에 붙여 둔다. */
 let engineBusy = false;
 
-async function engineCall(path) {
+async function engineCall(path, group) {
   if (engineBusy) return;
   engineBusy = true;
-  try { renderEngine(await api(path, {method: "POST"})); }
+  try {
+    const st = await api(path + (group ? `?group=${group}` : ""), {method: "POST"});
+    group === "short" ? renderShortEngine(st) : renderEngine(st);
+  }
   catch (e) { $("#alerts").innerHTML =
     `<div class="errbox">${e.message}</div>`; }
   finally { engineBusy = false; }
@@ -893,7 +902,7 @@ function renderEngine(st) {
   // 가드가 실제로 막는 시점과 어긋난다.
   guardState = st.guard || null;
   // 유튜브 카드가 발언권을 여기 실려 온 투표(signals[].votes)에서 읽는다
-  lastEngine = st;
+  engines.main = st;
   if (ytData && !ytBusy) renderYoutube(ytData);
   const box = $("#engine");
   const v = st.verdict || {};
@@ -944,11 +953,44 @@ function renderEngine(st) {
 
    MT5 가 끊겨 있어도 이 카드는 따로 돈다. 전략을 분석하고 고르는 일은
    브로커 연결과 상관이 없다. */
-let ytData = null, ytBusy = false, lastEngine = null;
+let ytData = null, ytBusy = false;
+const engines = {};          // 투표 군별 엔진 상태 (main, short)
 const ytOpen = new Set();
 
-function ytVoice(engineName) {
-  const votes = (lastEngine?.signals || [])
+/* ───────── 단기 자동매매 ─────────
+   1시간봉 미만(5·15·30분) 유튜브 전략은 기본 군에 넣을 수 없다 — 1시간봉으로는
+   그 조건을 계산할 수 없다. 그래서 **따로 투표하고 따로 진입·청산하는 군**을 둔다.
+   시작·정지는 군마다 따로다. 킬 스위치와 전량 청산은 위쪽 카드의 것이 둘 다 멈춘다. */
+function renderShortEngine(st) {
+  if (!st) return;
+  engines.short = st;
+  if (ytData && !ytBusy) renderYoutube(ytData);
+  const killed = st.guard?.kill_switch, on = st.running, idle = !st.interval;
+  const state = killed ? ["킬 스위치", "#f0616d"]
+              : on ? ["작동 중", "#3fb950"]
+              : ["정지", "var(--faint)"];
+  $("#shortengine").innerHTML = `
+    <div class="enginerow"><span class="k">상태</span>
+      <b style="color:${state[1]}">${state[0]}</b></div>
+    <div class="enginerow"><span class="k">봉</span>
+      <b>${idle ? "켜 둔 단기 전략 없음" : esc(st.interval)}</b></div>
+    ${engineLoopRow(st)}
+    <div class="enginerow"><span class="k">감시 종목</span><b>${st.scanned ?? 0}</b></div>
+    <div class="enginerow"><span class="k">보유</span><b>${(st.held || []).length}</b></div>
+    ${st.last_error ? `<div class="errbox">${esc(st.last_error)}</div>` : ""}
+    <div class="btns">
+      ${on ? `<button class="btn stop" onclick="engineCall('/api/fx/engine/stop', 'short')">정지</button>`
+           : `<button class="btn go" onclick="engineCall('/api/fx/engine/start', 'short')"
+                ${killed ? "disabled" : ""}>시작</button>`}
+      <button class="btn" onclick="engineCall('/api/fx/engine/once', 'short')">한 바퀴</button>
+    </div>
+    <div class="ytnote">5·15·30분봉 유튜브 전략끼리만 투표하고, 기본 군과 따로
+      진입·청산합니다. 켜 둔 단기 전략 중 가장 짧은 봉으로 돕니다. 킬 스위치와
+      일일 손실 한도는 두 군이 함께 씁니다.</div>`;
+}
+
+function ytVoice(engineName, group) {
+  const votes = (engines[group]?.signals || [])
     .map(s => (s.votes || []).find(v => v.strategy === engineName))
     .filter(Boolean);
   if (!votes.length) return null;
@@ -958,11 +1000,14 @@ function ytVoice(engineName) {
 function ytRow(s) {
   const name = esc(s.strategy_name);
   const banned = (ytData.banned || []).includes(s.engine_name);
-  const voice = s.enabled && !banned ? ytVoice(s.engine_name) : null;
+  const short = s.group === "short";
+  const voice = s.enabled && !banned && s.group ? ytVoice(s.engine_name, s.group) : null;
   const [status, cls] =
-      !s.enabled ? ["꺼짐", ""]
+      !s.enabled ? [short ? "꺼짐 · 단기 군" : "꺼짐", ""]
     : banned ? ["금지목록에 있어 제외", "warn"]
-    : s.timeframe_mode === "unsupported" ? ["적용 불가 · 봉이 더 짧음", "warn"]
+    : !s.group ? ["적용 불가", "warn"]
+    : voice && short ? [`단기 · 발언권 ${voice.voiced}/${voice.total}`, voice.voiced ? "on" : "warn"]
+    : short ? ["켜짐 · 단기 군", "on"]
     : voice ? [`발언권 ${voice.voiced}/${voice.total} 종목`, voice.voiced ? "on" : "warn"]
     : ["켜짐 · 다음 바퀴부터", "on"];
   const inds = (s.indicators_needed || []).map(i => {
@@ -988,10 +1033,12 @@ function ytRow(s) {
         <span class="ytst ${cls}">${esc(status)}</span>
       </summary>
       <div class="ytbody">
-        ${s.timeframe_mode === "unsupported" ? `<div class="warnbox">영상은
-          ${esc(s.timeframe)}봉 전략인데 엔진은 ${esc(ytData.engine_interval)}봉으로
-          돕니다. 더 짧은 봉의 조건은 계산할 수 없어 <b>켜도 투표하지 않습니다.</b>
-          엔진 봉(fx.interval)을 ${esc(s.timeframe)} 이하로 낮추면 적용됩니다.</div>`
+        ${short ? `<div class="ytk"><b>단기 군</b>에서 ${esc(s.timeframe)}봉으로
+          따로 투표합니다. 기존 전략과 섞이지 않고, 단기 군만의 포지션으로 따로
+          진입·청산합니다. "단기 자동매매" 카드에서 시작해야 돕니다.</div>`
+        : !s.group ? `<div class="warnbox">${esc(s.timeframe)}봉 전략은 적용할 수
+          없습니다. 단기 군이 다루는 가장 짧은 봉은 5분봉입니다 — 1분봉은 MT5 가
+          학습에 필요한 만큼 주지 않습니다. <b>켜도 투표하지 않습니다.</b></div>`
         : s.timeframe_mode === "resampled" ? `<div class="ytk">영상 기준
           <b>${esc(s.timeframe)}봉</b>으로 계산합니다 — 엔진의
           ${esc(ytData.engine_interval)}봉을 묶어서 보고, ${esc(s.timeframe)}봉이
@@ -1175,6 +1222,8 @@ async function refresh() {
       } else { renderStrip(); renderDetail(); }
       try { renderEngine(await api("/api/fx/engine")); }
       catch (e) { /* 엔진이 죽어도 차트는 계속 봐야 한다 */ }
+      try { renderShortEngine(await api("/api/fx/engine?group=short")); }
+      catch (e) { /* 단기 군이 죽어도 기본 군 화면은 그대로여야 한다 */ }
 
       // 잔고 부가정보와 내역은 MT5 거래 내역을 훑어야 해서 느리다.
       // 5초마다 부르면 터미널을 붙잡아 시세 갱신이 밀린다. 15초로 둔다.

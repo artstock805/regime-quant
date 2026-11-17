@@ -53,13 +53,22 @@ class LiveAccountBlocked(MT5Error):
     """실계좌인데 허용 설정이 없다. 기본값이 사람을 지켜야 한다."""
 
 
-def tag(symbol: str, bar_time: datetime | str) -> str:
+# 단기 투표 군이 연 주문의 표식. 태그에서 PREFIX 바로 뒤에 온다.
+# 심볼은 대문자로 쓰므로 소문자 s 와 점은 심볼 이름과 겹치지 않는다.
+SHORT_CODE = "s."
+
+
+def tag(symbol: str, bar_time: datetime | str, group_code: str = "") -> str:
     """
     같은 봉에 같은 종목으로 두 번 들어가지 않게 하는 표식.
 
     MT5 에는 거래소 쪽 중복 방지 ID 가 없으므로 comment 에 실어 보내고,
     진입 전에 열린 포지션의 comment 를 확인한다. 루프가 두 번 돌아도
     한 번만 나간다. comment 는 길이 제한이 빡빡하므로(대개 31자) 짧게 만든다.
+
+    group_code 는 **어느 투표 군이 연 주문인지**를 남긴다. 두 군이 한 계좌에서
+    따로 진입·청산하므로, 재시작한 뒤에도 포지션의 주인을 comment 에서 읽을 수
+    있어야 한다. 기억에만 두면 재시작 순간 남의 군 포지션을 내 것으로 센다.
     """
     if isinstance(bar_time, str):
         bar_time = datetime.fromisoformat(bar_time)
@@ -67,7 +76,19 @@ def tag(symbol: str, bar_time: datetime | str) -> str:
         bar_time = bar_time.replace(tzinfo=timezone.utc)
     core = symbol.upper()[:6]
     stamp = bar_time.astimezone(timezone.utc).strftime("%y%m%d%H%M")
-    return f"{PREFIX}{core}{stamp}"
+    return f"{PREFIX}{group_code}{core}{stamp}"
+
+
+def group_of(pos: dict) -> str:
+    """
+    이 포지션을 연 투표 군 ("main" 또는 "short").
+
+    표식이 없으면 기본 군이다 — 군을 나누기 전에 연 포지션과, 브로커가 comment 를
+    바꿔 버린 포지션이 여기 해당한다. 주인 없는 포지션으로 두면 아무도 청산
+    판단을 하지 않는다.
+    """
+    comment = str(pos.get("comment", "")).strip()
+    return "short" if comment.startswith(PREFIX + SHORT_CODE) else "main"
 
 
 @dataclass

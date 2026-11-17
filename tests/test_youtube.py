@@ -561,10 +561,16 @@ def test_the_screen_is_told_how_each_timeframe_is_handled(client, cfg):
     for name, tf in [("four_hour", "4h"), ("one_hour", "1h"),
                      ("five_min", "5m"), ("unspoken", None)]:
         store.save(raw_spec(strategy_name=name, timeframe=tf), URL, cfg=cfg)
-    modes = {s["strategy_name"]: s["timeframe_mode"]
-             for s in client.get("/api/youtube/strategies").json()["strategies"]}
+    store.save(raw_spec(strategy_name="one_min", timeframe="1m"), URL, cfg=cfg)
+    rows = client.get("/api/youtube/strategies").json()["strategies"]
+    modes = {s["strategy_name"]: s["timeframe_mode"] for s in rows}
     assert modes == {"four_hour": "resampled", "one_hour": "same",
-                     "five_min": "unsupported", "unspoken": "same"}
+                     "five_min": "unsupported", "one_min": "unsupported",
+                     "unspoken": "same"}
+    # 기본 군의 봉으로 계산할 수 없는 것 중 5분 이상은 단기 군으로 간다. 1분봉은 갈 곳이 없다.
+    groups = {s["strategy_name"]: s["group"] for s in rows}
+    assert groups == {"four_hour": "main", "one_hour": "main", "unspoken": "main",
+                      "five_min": "short", "one_min": None}
 
 
 # ─── 영상이 말한 시간봉으로 계산한다 ─────────────────────────────

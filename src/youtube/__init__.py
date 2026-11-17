@@ -6,9 +6,13 @@
 
     pipeline.run(url)        추출해서 저장 (꺼진 채로)
     store.set_enabled(...)   켜기·끄기
-    enabled_strategies()     엔진이 매 바퀴 읽는 목록
+    enabled_strategies()     기본 군 엔진이 매 바퀴 읽는 목록
+    short_strategies()       단기 군 엔진이 읽는 목록 (엔진 봉보다 짧은 전략)
 """
 
-from .strategy import PREFIX, YoutubeStrategy, enabled_strategies
+from .strategy import (
+    PREFIX, YoutubeStrategy, enabled_strategies, short_interval, short_strategies,
+)
 
-__all__ = ["PREFIX", "YoutubeStrategy", "enabled_strategies"]
+__all__ = ["PREFIX", "YoutubeStrategy", "enabled_strategies",
+           "short_interval", "short_strategies"]

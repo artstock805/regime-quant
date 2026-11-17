@@ -254,37 +254,50 @@ def follow(symbol: str) -> None:
 # ═══════════════════════════════════════════════════════════════
 
 
-def _engine():
+def _engine(group: str = "main"):
+    """
+    투표 군의 엔진. group 은 "main"(기본 군) 또는 "short"(단기 군)이다.
+    시작·정지·한 바퀴는 군마다 따로 하고, 킬 스위치와 전량 청산은 군을 가리지 않는다.
+    """
     from ..fx.engine import trader
-    return trader()
+    try:
+        return trader(group)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.get("/api/fx/engine")
-def engine_status() -> dict[str, Any]:
+def engine_status(group: str = "main") -> dict[str, Any]:
     try:
-        return _engine().status()
+        return _engine(group).status()
     except MT5Error as exc:
         raise HTTPException(502, str(exc)) from exc
 
 
 @router.post("/api/fx/engine/start")
-def engine_start() -> dict[str, Any]:
+def engine_start(group: str = "main") -> dict[str, Any]:
     try:
-        return _engine().start()
+        return _engine(group).start()
     except MT5Error as exc:
         raise HTTPException(502, str(exc)) from exc
 
 
 @router.post("/api/fx/engine/stop")
-def engine_stop() -> dict[str, Any]:
+def engine_stop(group: str = "main") -> dict[str, Any]:
     """새 진입만 막는다. 들고 있는 것은 계속 청산 판단을 받는다 —
     정지 버튼이 포지션을 방치하는 버튼이면 위험을 키운다."""
-    return _engine().stop()
+    return _engine(group).stop()
 
 
 @router.post("/api/fx/engine/kill")
 def engine_kill(reason: str = "사용자") -> dict[str, Any]:
-    return _engine().kill(reason)
+    """**모든 군을 멈춘다.** 멈추라고 했는데 다른 군이 계속 진입하면 킬 스위치가 아니다."""
+    from ..fx.engine import traders
+    out = _engine().kill(reason)
+    for other in traders():
+        if other.group.name != "main":
+            other.kill(reason)
+    return out
 
 
 @router.post("/api/fx/engine/release")
@@ -301,10 +314,10 @@ def engine_flatten() -> dict[str, Any]:
 
 
 @router.post("/api/fx/engine/once")
-def engine_once() -> dict[str, Any]:
+def engine_once(group: str = "main") -> dict[str, Any]:
     """한 바퀴 수동 실행. 엔진이 꺼져 있으면 신호만 계산하고 주문은 내지 않는다."""
     try:
-        return _engine().run_once()
+        return _engine(group).run_once()
     except MT5Error as exc:
         raise HTTPException(502, str(exc)) from exc
 

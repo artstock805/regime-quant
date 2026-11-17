@@ -173,17 +173,64 @@ class YoutubeStrategy(Strategy):
         return (trigger.ffill(limit=hold - 1) if hold > 1 else trigger).fillna(0.0)
 
 
-def enabled_strategies(cfg: Config | None = None) -> list[YoutubeStrategy]:
-    """
-    엔진이 투표에 넣을 유튜브 전략. 호출할 때마다 파일을 다시 읽으므로 토글이
-    다음 바퀴에 반영된다.
+# 단기 군이 다루는 가장 짧은 봉(분). **1분봉은 넣지 않는다.** MT5 가 학습 구간만큼의
+# 1분봉을 주지 않고(실측: 6개월치 요청이 실패한다), 준다 해도 28종목을 1분 안에
+# 훑을 수 없다. 5분봉은 6개월치를 받고 종목당 3.1초였다(28종목 약 1분 30초).
+MIN_SHORT_MINUTES = 5
 
-    켜 두었어도 **엔진의 봉으로 계산할 수 없는 전략은 뺀다** (영상 봉이 엔진 봉보다
-    짧은 경우). 넣어 봐야 기권만 하고, 화면에는 투표하는 것처럼 보인다.
+MAIN_GROUP, SHORT_GROUP = "main", "short"
+
+
+def strategy_group(timeframe: str | None, base: str) -> str | None:
     """
-    cfg = cfg or load_config()
+    이 전략이 들어가는 투표 군.
+
+        main   엔진 봉(base) 이상 — 기존 전략과 함께 투표한다
+        short  엔진 봉보다 짧다 — 단기 전략끼리 따로 투표하고 따로 진입·청산한다
+        None   적용할 수 없다 (1분봉 등)
+
+    **짧은 봉 전략을 기본 군에 넣지 않는 이유.** 기본 군은 엔진 봉으로 돌고, 그
+    봉으로는 더 짧은 봉의 조건을 계산할 수 없다. 반대로 기본 군 전체를 짧은 봉으로
+    내리면 1시간봉으로 검증한 기존 전략이 전부 다른 것이 된다. 그래서 군을 가른다.
+    """
+    if timeframe_mode(timeframe, base) != UNSUPPORTED:
+        return MAIN_GROUP
+    want, have = MINUTES.get(timeframe), MINUTES.get(base)
+    if want is not None and have is not None and MIN_SHORT_MINUTES <= want < have:
+        return SHORT_GROUP
+    return None
+
+
+def _enabled(cfg: Config, group: str) -> list[YoutubeStrategy]:
     base = str(cfg.get("fx.interval", "1h"))
     return [YoutubeStrategy(record["spec"])
             for record in store.load_all(cfg)
             if record["enabled"]
-            and timeframe_mode(record["spec"]["timeframe"], base) != UNSUPPORTED]
+            and strategy_group(record["spec"]["timeframe"], base) == group]
+
+
+def enabled_strategies(cfg: Config | None = None) -> list[YoutubeStrategy]:
+    """
+    기본 군 엔진이 투표에 넣을 유튜브 전략. 호출할 때마다 파일을 다시 읽으므로
+    토글이 다음 바퀴에 반영된다.
+
+    켜 두었어도 **엔진의 봉으로 계산할 수 없는 전략은 뺀다** (영상 봉이 엔진 봉보다
+    짧은 경우). 그런 전략은 단기 군으로 간다 (short_strategies).
+    """
+    return _enabled(cfg or load_config(), MAIN_GROUP)
+
+
+def short_strategies(cfg: Config | None = None) -> list[YoutubeStrategy]:
+    """단기 군 엔진이 투표에 넣을 유튜브 전략 — 엔진 봉보다 짧은 시간봉의 전략."""
+    return _enabled(cfg or load_config(), SHORT_GROUP)
+
+
+def short_interval(cfg: Config | None = None) -> str | None:
+    """
+    단기 군이 도는 봉 — 켜 둔 단기 전략 중 **가장 짧은 시간봉**. 없으면 None.
+
+    더 긴 전략(예: 5분봉으로 도는데 15분봉 전략)은 YoutubeStrategy 가 묶어서
+    계산한다. 5·15·30분은 서로 배수라 항상 묶을 수 있다.
+    """
+    frames = [s.spec["timeframe"] for s in short_strategies(cfg)]
+    return min(frames, key=MINUTES.__getitem__) if frames else None

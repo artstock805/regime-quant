@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from ..config import load_config
 from ..youtube import PREFIX, pipeline, store
-from ..youtube.strategy import YoutubeStrategy, timeframe_mode
+from ..youtube.strategy import YoutubeStrategy, strategy_group, timeframe_mode
 
 router = APIRouter()
 
@@ -51,6 +51,9 @@ def _view(record: dict, engine_interval: str) -> dict[str, Any]:
         #   resampled    영상 봉이 더 길다 — 엔진 봉을 묶어서 영상 봉으로 계산한다
         #   unsupported  영상 봉이 더 짧다 — 계산할 수 없어 켜도 투표하지 않는다
         "timeframe_mode": timeframe_mode(spec["timeframe"], engine_interval),
+        # 어느 투표 군에 들어가는지: main(기존 전략과 함께) / short(단기 전략끼리 따로
+        # 투표·진입·청산) / null(적용 불가 — 1분봉 등)
+        "group": strategy_group(spec["timeframe"], engine_interval),
     }
 
 

@@ -43,6 +43,7 @@ from ..indicators import compute_all
 from ..live.signals import SymbolSignal, signal_for
 from ..strategies import build_all
 from ..youtube import enabled_strategies as youtube_strategies
+from ..youtube import short_interval, short_strategies
 from . import broker
 from . import watchlist as fx_watchlist
 from .mt5 import MT5Error, bars, account, positions, symbol_info
@@ -97,17 +98,70 @@ class EngineState:
     closed: list[dict] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class Group:
+    """
+    투표 군. 한 군 안의 전략끼리만 투표하고, 그 군만의 포지션을 열고 닫는다.
+
+        기본 군   기존 전략 + 엔진 봉 이상의 유튜브 전략. fx.interval 로 돈다.
+        단기 군   엔진 봉보다 짧은 유튜브 전략(5·15·30분). 그중 가장 짧은 봉으로 돈다.
+
+    **왜 가르는가.** 1시간봉으로는 15분봉 조건을 계산할 수 없고, 기본 군을 15분봉으로
+    내리면 1시간봉으로 검증한 기존 전략이 전부 다른 것이 된다. 그래서 짧은 전략은
+    자기 봉으로 따로 돌린다.
+
+    **두 군은 같은 계좌를 쓴다.** 그래서
+      · 포지션의 주인은 주문 태그(code)에서 읽는다. 각 군은 자기 것만 세고 닫는다.
+        같은 종목에 두 군이 따로, 반대 방향으로도 들 수 있다(헤지 계좌).
+      · 위험 가드는 **함께 쓴다.** 킬 스위치·일일 손실 한도·분당 주문 한도는
+        계좌의 것이다. 군마다 따로 두면 한 군이 한도를 넘겨도 다른 군이 계속 진입한다.
+      · 동시 보유 한도(max_positions)만 군마다 따로 센다.
+
+    단기 군은 **검증된 적이 없다.** 이 프로젝트는 짧은 봉일수록 비용이 1R 을 크게
+    먹는다는 것을 실측했다(5분봉 13~27%). 발언권은 기본 군과 같은 방식(최근 학습
+    구간의 비용 차감 성적)으로 정하므로, 비용을 못 이기는 전략은 가중치 0 이 된다.
+    """
+    name: str
+    code: str
+    label: str
+
+
+MAIN = Group("main", "", "기본 군")
+SHORT = Group("short", broker.SHORT_CODE, "단기 군")
+GROUPS = {g.name: g for g in (MAIN, SHORT)}
+
+
+class _GroupJournal:
+    """장부에 군 이름을 붙여 쓴다. 두 군이 한 장부를 쓰므로 누가 한 일인지 남아야 한다."""
+
+    def __init__(self, inner: Journal, group: str) -> None:
+        self._inner, self._group = inner, group
+
+    def write(self, kind: str, **fields: Any) -> dict:
+        return self._inner.write(kind, group=self._group, **fields)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class FxTrader:
     """
     한 번에 한 스레드만 돈다. MT5 는 스레드 안전하지 않고, 루프가 겹치면
     같은 신호로 두 번 주문할 수 있다.
     """
 
+    # 클래스 기본값으로도 둔다. __init__ 을 거치지 않는 대역(테스트의 FakeEngine)이
+    # 군 없이 만들어져도 기본 군으로 동작해야 한다.
+    group: Group = MAIN
+
     def __init__(self, cfg: Config | None = None,
                  journal: Journal | None = None,
-                 guard: RiskGuard | None = None) -> None:
+                 guard: RiskGuard | None = None,
+                 group: Group = MAIN) -> None:
         self.cfg = cfg or load_config()
-        self.journal = journal or Journal()
+        self.group = group
+        journal = journal or Journal()
+        self.journal = journal if group is MAIN else _GroupJournal(journal, group.name)
         self.guard = guard or RiskGuard(RiskLimits(
             risk_per_trade=float(self.cfg.get("risk.risk_per_trade", 0.01)),
             max_positions=int(self.cfg.get("live.max_positions", 3)),
@@ -129,7 +183,15 @@ class FxTrader:
     # ─── 설정 ────────────────────────────────────────────────────
 
     @property
-    def interval(self) -> str:
+    def interval(self) -> str | None:
+        """
+        이 군이 도는 봉. 기본 군은 설정값(fx.interval)이다.
+
+        단기 군은 **켜 둔 단기 전략 중 가장 짧은 시간봉**이고, 하나도 없으면
+        None 이다 — 돌 것이 없으므로 루프가 아무것도 하지 않는다.
+        """
+        if self.group is SHORT:
+            return short_interval(self.cfg)
         return str(self.cfg.get("fx.interval", "1h"))
 
     @property
@@ -194,6 +256,10 @@ class FxTrader:
         """
         names = set(self.cfg.get("fx.strategies") or [])
         banned = set(self.cfg.get("fx.exclude_strategies") or [])
+        if self.group is SHORT:
+            # 단기 군에는 기존 전략을 넣지 않는다. 그것들은 1시간봉으로 만들고
+            # 검증한 것이라, 5분봉 위에서 돌리면 같은 이름의 다른 전략이 된다.
+            return [s for s in short_strategies(self.cfg) if s.name not in banned]
         out = []
         for s in build_all():
             if any(str(n).startswith(("perp_", "funding", "oi_", "basis"))
@@ -265,7 +331,8 @@ class FxTrader:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, name="fx-engine",
+        self._thread = threading.Thread(target=self._loop,
+                                        name=f"fx-engine-{self.group.name}",
                                         daemon=True)
         self._thread.start()
 
@@ -276,10 +343,13 @@ class FxTrader:
         `bars()` 가 진행 중인 봉을 버리고 주므로, 이 값이 바뀌면 새 봉이
         마감된 것이다. 별도의 settle 대기가 필요 없다.
         """
+        interval = self.interval
+        if interval is None:          # 단기 군인데 켜 둔 단기 전략이 없다
+            return None
         pairs = self.watchlist()
         if not pairs:
             return None
-        df = bars(pairs[0].mt5, self.interval, 3)
+        df = bars(pairs[0].mt5, interval, 3)
         if df.empty:
             return None
         return df.index[-1].isoformat()
@@ -341,7 +411,10 @@ class FxTrader:
         if rec["closed_elsewhere"]:
             self.journal.write("reconcile", closed_elsewhere=rec["closed_elsewhere"],
                                note="브로커 쪽에서 닫혔습니다 (손절 체결·수동 청산·재시작)")
-        self._known = dict(rec["open"])
+        # 두 군이 같은 계좌를 쓴다. **자기 군이 연 것만 자기 것으로 센다.** 남의 군
+        # 포지션까지 세면 그쪽 신호로 내 포지션을 닫거나, 내 한도를 남의 것으로 채운다.
+        self._known = {k: v for k, v in rec["open"].items()
+                       if broker.group_of(v) == self.group.name}
 
         ep = ExecParams(
             risk_per_trade=float(self.cfg.require("risk.risk_per_trade")),
@@ -350,6 +423,13 @@ class FxTrader:
             daily_loss_limit=float(self.cfg.require("risk.daily_loss_limit")),
         )
         strats = self.strategies()
+        if not strats:
+            # 투표할 전략이 없다(단기 군에서 전략을 전부 껐을 때). 들고 있는 것은
+            # 브로커의 손절·목표가 지킨다 — 신호가 없으니 여기서 판단할 것이 없다.
+            self.state.scanned = 0
+            self.state.last_run = datetime.now(timezone.utc).isoformat()
+            self.state.last_error = None
+            return self.status()
         pairs = self.watchlist()
         self.state.scanned = len(pairs)
 
@@ -447,7 +527,7 @@ class FxTrader:
             self._blocked(pair, decision.reason)
             return
 
-        tag_value = broker.tag(pair.mt5, sig.bar_time)
+        tag_value = broker.tag(pair.mt5, sig.bar_time, self.group.code)
         try:
             fill = broker.open_position(
                 pair.mt5, side, lots, sig.stop_price, sig.target_price,
@@ -497,8 +577,11 @@ class FxTrader:
         except MT5Error as exc:
             balance, acct_d = 0.0, {"error": str(exc)}
         return {
+            "group": self.group.name,
+            "group_label": self.group.label,
             "running": self.state.running,
             "mode": self.state.mode,
+            # 단기 군은 켜 둔 단기 전략이 없으면 None — 돌 것이 없다는 뜻이다
             "interval": self.interval,
             "allow_live": self.allow_live,
             "verdict": VERDICT,
@@ -523,14 +606,30 @@ class FxTrader:
         }
 
 
-_trader: FxTrader | None = None
+_traders: dict[str, FxTrader] = {}
 _trader_lock = threading.Lock()
 
 
-def trader() -> FxTrader:
-    """앱 전체가 하나의 엔진을 쓴다. 두 개가 돌면 같은 신호로 두 번 주문한다."""
-    global _trader
+def trader(group: str = "main") -> FxTrader:
+    """
+    **군마다 엔진 하나.** 같은 군에 둘이 돌면 같은 신호로 두 번 주문한다.
+
+    단기 군은 기본 군의 **가드와 장부를 함께 쓴다.** 킬 스위치·일일 손실 한도·
+    분당 주문 한도는 계좌의 것이고, 장부가 둘이면 같은 파일에 따로 써서 줄이 섞인다.
+    """
+    if group not in GROUPS:
+        raise KeyError(f"모르는 투표 군: {group} (가능: {', '.join(GROUPS)})")
     with _trader_lock:
-        if _trader is None:
-            _trader = FxTrader()
-        return _trader
+        if "main" not in _traders:
+            _traders["main"] = FxTrader()
+        if group not in _traders:
+            main = _traders["main"]
+            _traders[group] = FxTrader(cfg=main.cfg, journal=main.journal,
+                                       guard=main.guard, group=GROUPS[group])
+        return _traders[group]
+
+
+def traders() -> list[FxTrader]:
+    """지금까지 만들어진 엔진 전부 — 킬 스위치처럼 군을 가리지 않는 동작에 쓴다."""
+    with _trader_lock:
+        return list(_traders.values())
