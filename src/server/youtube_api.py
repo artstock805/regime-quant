@@ -89,6 +89,14 @@ def youtube_strategies() -> dict[str, Any]:
         "strategies": [_view(r, interval) for r in store.load_all(cfg)],
         # 지금 돌고 있는(또는 마지막으로 돈) 검증. 화면이 진행 상황을 여기서 읽는다.
         "validation_job": validation.status(cfg),
+        # 손실로 검증돼 보관함으로 옮긴 전략. 목록에는 넣지 않고 따로 준다 —
+        # 화면은 접힌 한 줄로만 보여 준다.
+        "archived": [{"strategy_name": r["spec"]["strategy_name"],
+                      "timeframe": r["spec"]["timeframe"],
+                      "source_url": r["source_url"],
+                      "net_r": (r.get("validation") or {}).get("net_r"),
+                      "trades": (r.get("validation") or {}).get("trades")}
+                     for r in store.load_archived(cfg)],
     }
 
 

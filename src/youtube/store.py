@@ -213,6 +213,40 @@ def set_validation(name: str, result: dict, cfg: Config | None = None) -> bool:
     return True
 
 
+# ─── 보관함 ──────────────────────────────────────────────────────
+#
+# 손실로 검증된 전략은 여기로 옮긴다. 켤 수도 없는 전략이 목록에 쌓이면 쓸 만한
+# 것이 그 사이에 묻힌다. 지우지는 않는다 — 어떤 영상이 어떤 성적이었는지가
+# 남아 있어야 같은 영상을 다시 분석하는 헛수고를 안 한다.
+# load_all 은 이 폴더를 읽지 않으므로 화면 목록과 엔진 투표에서 함께 빠진다.
+ARCHIVE = "archive"
+
+
+def archive_directory(cfg: Config | None = None) -> Path:
+    return directory(cfg) / ARCHIVE
+
+
+def archive(name: str, cfg: Config | None = None) -> dict:
+    """전략을 보관함으로 옮긴다. 꺼서 옮기고, 같은 이름의 옛 보관본은 덮어쓴다."""
+    with _write_lock:
+        record = {**get(name, cfg), "enabled": False}
+        _write(archive_directory(cfg) / f"{check_name(name)}.json", record)
+        _path(name, cfg).unlink()
+    return record
+
+
+def load_archived(cfg: Config | None = None) -> list[dict]:
+    """보관된 전략. 읽을 수 없는 파일은 건너뛴다."""
+    folder = archive_directory(cfg)
+    out = []
+    for path in sorted(folder.glob("*.json")) if folder.exists() else []:
+        try:
+            out.append(_read(path))
+        except Exception as exc:
+            logger.warning("보관된 전략 파일을 읽지 못해 건너뜁니다: %s (%s)", path.name, exc)
+    return out
+
+
 def delete(name: str, cfg: Config | None = None) -> None:
     path = _path(name, cfg)
     with _write_lock:

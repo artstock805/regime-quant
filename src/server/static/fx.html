@@ -1177,9 +1177,25 @@ function renderYoutube(d) {
     GEMINI_API_KEY 또는 OPENAI_API_KEY 환경변수가 필요합니다. 설정한 뒤 서버를
     다시 시작하세요. 저장된 전략을 켜고 끄는 것은 키 없이도 됩니다.</div>`;
   $("#ytgo").disabled = ytBusy || !d.llm_ready;
-  $("#ytlist").innerHTML = d.strategies.length
+  // 손실로 검증된 전략은 목록에 두지 않는다 — 켤 수도 없는 것이 쌓이면 쓸 만한
+  // 후보가 묻힌다. 지우지는 않고 접힌 한 줄로 남긴다: 어떤 영상이 어떤 성적이었는지
+  // 보여야 같은 영상을 다시 분석하지 않는다.
+  const kept = d.archived || [];
+  const job = d.validation_job || {};
+  const moved = job.state === "done" && job.archived
+    ? `<div class="ytnote"><b>${esc(job.name)}</b> — 검증 결과 손실(${
+        job.net_r != null ? rText(job.net_r) : ""})이라 보관함으로 옮겼습니다.</div>` : "";
+  const shelf = kept.length ? `<details class="yt"><summary>
+      <b style="font-weight:400;color:var(--faint)">손실로 보관된 전략 ${kept.length}개</b>
+    </summary><div class="ytbody">${kept.map(a => `<div>${esc(a.strategy_name)}
+      <span class="neg">${a.net_r != null ? rText(a.net_r) : ""}</span>
+      <span style="color:var(--faint)">${esc(a.timeframe || "")}봉 ·
+        ${(a.trades ?? 0).toLocaleString()}건</span></div>`).join("")}
+      <div style="color:var(--faint);font-size:10.5px;margin-top:4px">투표에 들어가지
+        않습니다. 파일은 runs/youtube/archive 에 있습니다.</div></div></details>` : "";
+  $("#ytlist").innerHTML = (d.strategies.length
     ? d.strategies.map(ytRow).join("")
-    : `<div class="empty">저장된 전략이 없습니다.</div>`;
+    : `<div class="empty">저장된 전략이 없습니다.</div>`) + moved + shelf;
 }
 
 async function refreshYoutube() {

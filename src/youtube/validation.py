@@ -297,8 +297,13 @@ def main(argv: list[str] | None = None) -> int:
         result["spec_created_at"] = record["created_at"]
         if not store.set_validation(name, result, cfg):
             raise ValidationError("검증하는 동안 전략이 바뀌어 결과를 버렸습니다")
+        # 손실로 나왔으면 보관함으로 옮긴다. 목록에는 켤 수 있는 후보만 남긴다.
+        lost = isinstance(result.get("net_r"), (int, float)) and result["net_r"] < 0
+        if lost:
+            store.archive(name, cfg)
         write_status(cfg, name=name, state="done", done=result["pairs"],
-                     total=result["pairs"], symbol="")
+                     total=result["pairs"], symbol="", archived=lost,
+                     net_r=result.get("net_r"))
         return 0
     except Exception as exc:
         write_status(cfg, name=name, state="failed", error=f"{type(exc).__name__}: {exc}"

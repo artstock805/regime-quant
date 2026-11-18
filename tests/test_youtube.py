@@ -758,9 +758,14 @@ def test_the_child_process_entry_saves_the_result(vcfg, monkeypatch):
         point=lambda name: 0.00001, progress=progress))
 
     assert validation.main(["sma_trend"]) == 0
-    saved = store.get("sma_trend", vcfg)["validation"]
+    done = validation.read_status(vcfg)
+    assert done["state"] == "done"
+    # 손실로 나왔으면 보관함으로 옮겨져 있다 — 어느 쪽이든 결과는 전략과 함께 있다
+    where = store.load_archived(vcfg) if done["archived"] else store.load_all(vcfg)
+    saved = where[0]["validation"]
     assert saved["pairs"] == 1 and saved["trades"] > 0
-    assert validation.read_status(vcfg)["state"] == "done"
+    assert done["archived"] is (saved["net_r"] < 0)
+    assert len(store.load_all(vcfg)) + len(store.load_archived(vcfg)) == 1
 
     assert validation.main(["nope"]) == 1
     assert validation.read_status(vcfg)["state"] == "failed"
@@ -881,6 +886,46 @@ def test_the_api_refuses_and_reports_the_block(client, cfg):
     assert row["blocked"] is True and row["enabled"] is False
     assert client.post("/api/youtube/strategies/sma_trend/enable",
                        json={"on": False}).status_code == 200
+
+
+# ─── 손실로 검증된 전략은 보관함으로 ─────────────────────────────
+
+def test_an_archived_strategy_leaves_the_list_and_the_vote(vcfg):
+    judged(vcfg, -0.12)
+    judged(vcfg, 0.05, name="keeper")
+    store.archive("sma_trend", vcfg)
+
+    assert [r["spec"]["strategy_name"] for r in store.load_all(vcfg)] == ["keeper"]
+    shelved = store.load_archived(vcfg)
+    assert [r["spec"]["strategy_name"] for r in shelved] == ["sma_trend"]
+    assert shelved[0]["validation"]["net_r"] == -0.12, "성적표는 함께 옮겨진다"
+    assert shelved[0]["enabled"] is False
+    assert (store.archive_directory(vcfg) / "sma_trend.json").exists()
+    with pytest.raises(store.StoreError):
+        store.set_enabled("sma_trend", True, vcfg)        # 목록에 없는 전략은 켤 수 없다
+
+
+def test_an_archived_name_can_be_used_again(vcfg):
+    """같은 영상을 다시 분석하면 LLM 이 같은 이름을 지을 수 있다. 보관본이 막으면 안 된다."""
+    judged(vcfg, -0.12)
+    store.archive("sma_trend", vcfg)
+    store.save(raw_spec(), URL, cfg=vcfg)
+    assert len(store.load_all(vcfg)) == 1 and len(store.load_archived(vcfg)) == 1
+    record = store.get("sma_trend", vcfg)
+    store.set_validation("sma_trend", {"net_r": -0.3,
+                                       "spec_created_at": record["created_at"]}, vcfg)
+    store.archive("sma_trend", vcfg)                      # 옛 보관본을 덮어쓴다
+    assert [r["validation"]["net_r"] for r in store.load_archived(vcfg)] == [-0.3]
+
+
+def test_the_list_keeps_archived_strategies_apart(client, cfg):
+    judged(cfg, -0.12)
+    judged(cfg, 0.05, name="keeper")
+    store.archive("sma_trend", cfg)
+    body = client.get("/api/youtube/strategies").json()
+    assert [s["strategy_name"] for s in body["strategies"]] == ["keeper"]
+    assert body["archived"] == [{"strategy_name": "sma_trend", "timeframe": "1h",
+                                 "source_url": URL, "net_r": -0.12, "trades": None}]
 
 
 # ─── 검증을 통과해야 켤 수 있다 ──────────────────────────────────
