@@ -1069,9 +1069,9 @@ function ytPlay(id, name) {
     <div class="ytk" style="display:flex;align-items:center;gap:8px;margin-top:10px">
       <span style="flex:1">영상 · ${esc(name)}</span>
       <button class="btn" onclick="$('#ytplayer').innerHTML = ''">닫기</button></div>
-    <iframe src="https://www.youtube-nocookie.com/embed/${id}" title="${esc(name)}"
+    <iframe src="https://www.youtube-nocookie.com/embed/${id}?autoplay=1" title="${esc(name)}"
       style="width:100%;aspect-ratio:16/9;border:1px solid var(--line);border-radius:6px;margin-top:6px"
-      allow="encrypted-media; picture-in-picture; fullscreen" allowfullscreen
+      allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen
       referrerpolicy="strict-origin-when-cross-origin"></iframe>`;
   $("#ytplayer").scrollIntoView({block: "nearest"});
 }
