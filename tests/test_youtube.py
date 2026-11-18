@@ -823,9 +823,10 @@ def judged(cfg, net_r, name="sma_trend", **spec_over) -> None:
 def test_only_a_loss_after_costs_blocks_a_strategy(vcfg, net_r, blocked):
     """판정하지 못한 것(None)과 검증하지 않은 것은 막지 않는다 — 모르는 것과 나쁜 것은 다르다."""
     judged(vcfg, net_r)
-    assert store.blocked_by_validation(store.get("sma_trend", vcfg)) is blocked
+    # vcfg 에는 require_validation 이 없다 — 손실 차단만 보는 경우다
+    assert store.blocked_by_validation(store.get("sma_trend", vcfg), vcfg) is blocked
     store.save(raw_spec(strategy_name="unjudged"), URL, cfg=vcfg)
-    assert store.blocked_by_validation(store.get("unjudged", vcfg)) is False
+    assert store.blocked_by_validation(store.get("unjudged", vcfg), vcfg) is False
 
 
 def test_a_losing_strategy_cannot_be_switched_on(vcfg):
@@ -880,6 +881,59 @@ def test_the_api_refuses_and_reports_the_block(client, cfg):
     assert row["blocked"] is True and row["enabled"] is False
     assert client.post("/api/youtube/strategies/sma_trend/enable",
                        json={"on": False}).status_code == 200
+
+
+# ─── 검증을 통과해야 켤 수 있다 ──────────────────────────────────
+
+@pytest.fixture
+def strict(vcfg) -> Config:
+    raw = dict(vcfg.raw)
+    raw["youtube"] = {**raw["youtube"], "require_validation": True}
+    return Config(raw)
+
+
+def test_the_committed_config_requires_validation():
+    from src.config import load_config
+    assert load_config(use_local=False).get("youtube.require_validation") is True
+
+
+def test_an_unvalidated_strategy_cannot_be_switched_on(strict):
+    store.save(raw_spec(), URL, cfg=strict)
+    with pytest.raises(store.BlockedError, match="검증"):
+        store.set_enabled("sma_trend", True, strict)
+    assert store.get("sma_trend", strict)["enabled"] is False
+
+
+@pytest.mark.parametrize("net_r, allowed", [(0.0, True), (0.04, True), (-0.01, False),
+                                            (None, False)])
+def test_only_a_passing_result_unlocks_the_switch(strict, net_r, allowed):
+    """검증을 돌렸다는 것과 통과했다는 것은 다르다. 판정이 없으면(None) 근거도 없다."""
+    judged(strict, net_r)
+    if allowed:
+        assert store.set_enabled("sma_trend", True, strict)["enabled"] is True
+        assert [s.name for s in enabled_strategies(strict)] == ["yt_sma_trend"]
+    else:
+        with pytest.raises(store.BlockedError):
+            store.set_enabled("sma_trend", True, strict)
+
+
+def test_the_engine_leaves_out_unvalidated_strategies_already_marked_enabled(strict, vcfg):
+    """이 규칙 이전에 켜 둔 전략은 파일에 enabled 로 남아 있다."""
+    store.save(raw_spec(), URL, cfg=vcfg)
+    store.set_enabled("sma_trend", True, vcfg)            # 규칙이 없던 때
+    assert [s.name for s in enabled_strategies(vcfg)] == ["yt_sma_trend"]
+    assert enabled_strategies(strict) == []               # 규칙이 생긴 뒤
+
+
+def test_the_reason_says_which_kind_of_block(strict):
+    store.save(raw_spec(), URL, cfg=strict)
+    assert "하지 않았습니다" in store.block_reason(store.get("sma_trend", strict), strict)
+    judged(strict, None, name="thin")
+    assert "판정할 수 없습니다" in store.block_reason(store.get("thin", strict), strict)
+    judged(strict, -0.1, name="loser")
+    assert "손실" in store.block_reason(store.get("loser", strict), strict)
+    judged(strict, 0.1, name="winner")
+    assert store.block_reason(store.get("winner", strict), strict) is None
 
 
 # ─── 영상이 말하지 않은 방향은 만들지 않는다 ─────────────────────

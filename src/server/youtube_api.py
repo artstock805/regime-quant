@@ -44,6 +44,7 @@ class ValidateRequest(BaseModel):
 
 def _view(record: dict, engine_interval: str) -> dict[str, Any]:
     spec = record["spec"]
+    reason = store.block_reason(record, load_config())
     return {
         **spec,
         "engine_name": PREFIX + spec["strategy_name"],
@@ -61,7 +62,9 @@ def _view(record: dict, engine_interval: str) -> dict[str, Any]:
         # 과거 검증 결과. null 이면 아직 검증하지 않았다.
         "validation": record.get("validation"),
         # 과거 검증에서 손실로 나와 켤 수 없고 투표에도 들어가지 않는다.
-        "blocked": store.blocked_by_validation(record),
+        "blocked": reason is not None,
+        # 왜 켤 수 없는지 (손실 / 검증 안 함 / 판정 불가). 켤 수 있으면 null.
+        "block_reason": reason,
     }
 
 

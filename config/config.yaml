@@ -245,6 +245,12 @@ youtube:
   gemini_model: "gemini-3.8-flash"
   openai_model: "gpt-4o-mini"
   whisper_model: "whisper-1"
+  # 과거 검증을 **통과한** 전략만 켤 수 있다. 검증하지 않은 전략, 거래가 너무 적어
+  # 판정하지 못한 전략은 켤 수 없고 투표에도 들어가지 않는다.
+  # (손실로 검증된 전략은 이 값과 무관하게 언제나 막는다.)
+  # 저장된 전략 6개를 검증해 보니 5개가 비용 후 손실이었다 — 영상의 진입 규칙을
+  # 그대로 옮긴 것만으로는 FX 의 스프레드를 넘지 못했다. 보고 나서 켜는 것이 맞다.
+  require_validation: true
 
 # 실전 투입 합격 기준. out-of-sample 구간에서 전부 통과해야 페이퍼로 넘어간다
 acceptance:

@@ -145,7 +145,7 @@ class BlockedError(StoreError):
     """과거 검증에서 손실로 나온 전략이라 켤 수 없다."""
 
 
-def blocked_by_validation(record: dict) -> bool:
+def blocked_by_validation(record: dict, cfg: Config | None = None) -> bool:
     """
     과거 검증에서 **비용 후 기대값이 음수**로 나온 전략인가. 그런 전략은 켤 수 없고
     투표에도 들어가지 않는다.
@@ -158,18 +158,35 @@ def blocked_by_validation(record: dict) -> bool:
     적어 판정하지 못한 전략(net_r 가 없다)도 막지 않는다.
     같은 이름으로 다시 분석하면 검증 결과가 지워지므로 다시 켤 수 있다.
     """
-    result = record.get("validation") or {}
-    net = result.get("net_r")
-    return isinstance(net, (int, float)) and not isinstance(net, bool) and net < 0
+    return block_reason(record, cfg) is not None
+
+
+def block_reason(record: dict, cfg: Config | None = None) -> str | None:
+    """
+    이 전략을 켤 수 없는 이유. 켤 수 있으면 None.
+
+    손실로 검증된 전략은 언제나 막는다. `youtube.require_validation` 이 켜져 있으면
+    (저장소 기본 설정) **검증을 통과한 전략만** 켤 수 있다 — 검증하지 않은 전략과,
+    거래가 너무 적어 판정하지 못한 전략도 막는다. 검증을 돌렸다는 것과 통과했다는
+    것은 다르다. 판정이 없으면 괜찮다는 근거도 없다.
+    """
+    result = record.get("validation") or None
+    net = (result or {}).get("net_r")
+    if isinstance(net, (int, float)) and not isinstance(net, bool):
+        return f"과거 검증에서 손실({net:+.3f}R)로 나왔습니다" if net < 0 else None
+    if not bool((cfg or load_config()).get("youtube.require_validation", False)):
+        return None
+    if result is None:
+        return "아직 과거 검증을 하지 않았습니다. 검증을 통과해야 켤 수 있습니다"
+    return f"거래가 너무 적어({result.get('trades', 0)}건) 판정할 수 없습니다"
 
 
 def set_enabled(name: str, enabled: bool, cfg: Config | None = None) -> dict:
     with _write_lock:
         current = get(name, cfg)
-        if enabled and blocked_by_validation(current):
-            raise BlockedError(
-                f"{name} 은 과거 검증에서 손실({current['validation']['net_r']:+.3f}R)로 "
-                "나와 켤 수 없습니다. 다시 분석해 규칙이 바뀌면 켤 수 있습니다")
+        reason = block_reason(current, cfg) if enabled else None
+        if reason:
+            raise BlockedError(f"{name} 은 켤 수 없습니다 — {reason}")
         record = {**current, "enabled": bool(enabled)}
         _write(_path(name, cfg), record)
     return record
@@ -188,7 +205,7 @@ def set_validation(name: str, result: dict, cfg: Config | None = None) -> bool:
         if record["created_at"] != result.get("spec_created_at"):
             return False
         updated = {**record, "validation": result}
-        if blocked_by_validation(updated):
+        if blocked_by_validation(updated, cfg):
             # 손실로 나왔으면 그 자리에서 끈다. 켜진 채 "차단됨"이라고만 표시하면
             # 화면의 토글과 실제 상태가 어긋난다.
             updated["enabled"] = False
