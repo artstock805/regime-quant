@@ -2,7 +2,7 @@
 유튜브 전략 API — 상황판의 "유튜브 전략" 카드가 쓴다.
 
     GET    /api/youtube/strategies               저장된 전략 + 켜짐 여부
-    POST   /api/youtube/extract                  URL 을 분석해 저장 (꺼진 채로)
+    POST   /api/youtube/extract                  URL 을 분석해 저장 (꺼진 채로) + 자동 검증
     POST   /api/youtube/strategies/{name}/enable 켜기·끄기 (본문 {"on": true|false})
     DELETE /api/youtube/strategies/{name}        삭제
 
@@ -89,6 +89,8 @@ def youtube_strategies() -> dict[str, Any]:
         "strategies": [_view(r, interval) for r in store.load_all(cfg)],
         # 지금 돌고 있는(또는 마지막으로 돈) 검증. 화면이 진행 상황을 여기서 읽는다.
         "validation_job": validation.status(cfg),
+        # 앞의 검증이 끝나기를 기다리는 전략 이름 (대입 직후 자동 검증의 대기 줄).
+        "validation_queue": validation.queued(),
         # 손실로 검증돼 보관함으로 옮긴 전략. 목록에는 넣지 않고 따로 준다 —
         # 화면은 접힌 한 줄로만 보여 준다.
         "archived": [{"strategy_name": r["spec"]["strategy_name"],
@@ -128,7 +130,14 @@ def youtube_extract(req: ExtractRequest) -> dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:                 # 네트워크·LLM API 오류
         raise HTTPException(502, f"{type(exc).__name__}: {exc}") from exc
-    return _view(record, str(cfg.get("fx.interval", "1h")))
+    # 대입하면 바로 과거 검증을 건다. 이미 도는 검증이 있으면 줄을 선다.
+    # 검증할 수 없는 전략(1분봉 등)은 그냥 저장만 한다 — 목록이 이유를 말해 준다.
+    try:
+        validation.enqueue(record["spec"]["strategy_name"], cfg)
+        queued = True
+    except (validation.ValidationError, store.StoreError):
+        queued = False
+    return {**_view(record, str(cfg.get("fx.interval", "1h"))), "validation_queued": queued}
 
 
 @router.post("/api/youtube/strategies/{name}/enable")

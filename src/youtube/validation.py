@@ -29,9 +29,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -237,6 +239,8 @@ def read_status(cfg: Config) -> dict:
 
 
 _process: subprocess.Popen | None = None
+_start_lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 def spawn(name: str) -> subprocess.Popen:
@@ -262,11 +266,63 @@ def start(name: str, cfg: Config | None = None) -> dict:
     cfg = cfg or load_config()
     record = store.get(name, cfg)
     interval_for(record["spec"], cfg)          # 검증할 수 없는 전략이면 여기서 멈춘다
-    if running():
-        raise ValidationError("이미 검증이 돌고 있습니다. 끝난 뒤 다시 시도하세요")
-    status = write_status(cfg, name=name, state="running", done=0, total=0, symbol="")
-    _process = spawn(name)
+    with _start_lock:                          # 사람의 클릭과 대기 줄이 동시에 띄우지 않게
+        if running():
+            raise ValidationError("이미 검증이 돌고 있습니다. 끝난 뒤 다시 시도하세요")
+        status = write_status(cfg, name=name, state="running", done=0, total=0, symbol="")
+        _process = spawn(name)
     return status
+
+
+# ─── 대기 줄 ─────────────────────────────────────────────────────
+#
+# 전략을 대입하면 바로 검증한다. 검증은 한 번에 하나만 돌기 때문에, 이미 도는
+# 중이면 줄을 세우고 앞의 것이 끝나는 대로 이어서 돌린다. 줄은 메모리에만 있다 —
+# 앱을 다시 켜면 사라지고, 그 전략은 "검증" 버튼으로 다시 돌리면 된다.
+_queue: list[str] = []
+_queue_lock = threading.Lock()
+_drainer: threading.Thread | None = None
+
+
+def enqueue(name: str, cfg: Config | None = None) -> None:
+    """검증을 줄에 세운다. 검증할 수 없는 전략이면 ValidationError."""
+    global _drainer
+    cfg = cfg or load_config()
+    interval_for(store.get(name, cfg)["spec"], cfg)
+    with _queue_lock:
+        if name not in _queue:
+            _queue.append(name)
+        if _drainer is None:
+            _drainer = threading.Thread(target=_drain, args=(cfg,), daemon=True,
+                                        name="youtube-validation-queue")
+            _drainer.start()
+
+
+def queued() -> list[str]:
+    with _queue_lock:
+        return list(_queue)
+
+
+def _drain(cfg: Config) -> None:
+    global _drainer
+    while True:
+        process = _process
+        if process is not None and process.poll() is None:
+            process.wait()
+            continue
+        with _queue_lock:
+            if not _queue:
+                _drainer = None
+                return
+            name = _queue.pop(0)
+        try:
+            start(name, cfg)
+        except (ValidationError, store.StoreError) as exc:
+            if running():        # 그 사이 사람이 다른 검증을 눌렀다 — 다시 줄 맨 앞에
+                with _queue_lock:
+                    _queue.insert(0, name)
+            else:                # 그 사이 지워졌거나 바뀐 전략 — 건너뛴다
+                logger.warning("대기하던 검증을 건너뜁니다: %s (%s)", name, exc)
 
 
 def status(cfg: Config | None = None) -> dict:

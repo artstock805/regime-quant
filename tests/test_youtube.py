@@ -501,6 +501,8 @@ def client(cfg, monkeypatch, fake_llm):
     from src.server import youtube_api
 
     monkeypatch.setattr(youtube_api, "load_config", lambda: cfg)
+    # 대입하면 자동 검증이 걸린다 — 테스트에서 진짜 자식 프로세스를 띄우지 않는다
+    monkeypatch.setattr(youtube_api.validation, "enqueue", lambda name, cfg_: None)
     app = FastAPI()
     app.include_router(youtube_api.router)
     fake_llm[0].append(json.dumps(raw_spec()))
@@ -786,6 +788,63 @@ def test_only_one_validation_runs_at_a_time(vcfg, monkeypatch):
         validation.start("sma_trend", vcfg)
     assert spawned == ["sma_trend"]
     assert validation.status(vcfg)["state"] == "running"
+
+
+def test_queued_validations_run_one_after_another(vcfg, monkeypatch):
+    import threading
+    import time
+
+    class Child:
+        def __init__(self):
+            self.finished = threading.Event()
+
+        def poll(self):
+            return 0 if self.finished.is_set() else None
+
+        def wait(self):
+            self.finished.wait(5)
+
+    store.save(raw_spec(), URL, cfg=vcfg)
+    store.save({**raw_spec(), "strategy_name": "sma_other"}, URL, cfg=vcfg)
+    children, names = [], []
+
+    def spawn(name):
+        names.append(name)
+        children.append(Child())
+        return children[-1]
+
+    monkeypatch.setattr(validation, "_process", None)
+    monkeypatch.setattr(validation, "_drainer", None)
+    monkeypatch.setattr(validation, "_queue", [])
+    monkeypatch.setattr(validation, "spawn", spawn)
+
+    def wait_for(condition):
+        for _ in range(200):
+            if condition():
+                return True
+            time.sleep(0.01)
+        return False
+
+    validation.enqueue("sma_trend", vcfg)
+    validation.enqueue("sma_other", vcfg)
+    assert wait_for(lambda: names == ["sma_trend"])
+    assert validation.queued() == ["sma_other"]          # 앞의 것이 끝나길 기다린다
+
+    children[0].finished.set()
+    assert wait_for(lambda: names == ["sma_trend", "sma_other"])
+    assert validation.queued() == []
+    children[1].finished.set()
+    assert wait_for(lambda: validation._drainer is None)
+
+
+def test_extracting_a_strategy_queues_its_validation(client, monkeypatch):
+    from src.server import youtube_api
+    queued = []
+    monkeypatch.setattr(youtube_api.validation, "enqueue",
+                        lambda name, cfg_: queued.append(name))
+    made = client.post("/api/youtube/extract", json={"url": URL}).json()
+    assert queued == ["sma_trend"] and made["validation_queued"] is True
+    assert client.get("/api/youtube/strategies").json()["validation_queue"] == []
 
 
 def test_a_dead_process_is_not_reported_as_running_forever(vcfg, monkeypatch):

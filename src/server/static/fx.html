@@ -1123,6 +1123,11 @@ function ytValidation(s) {
       <div>검증 중… ${job.done ?? 0}/${job.total || "?"} ${esc(job.symbol || "")}
         <span style="color:var(--faint)">— 몇 분 걸립니다. 엔진은 계속 돕니다.</span></div>`;
   }
+  if ((ytData.validation_queue || []).includes(s.strategy_name)) {
+    return `<div class="ytk">과거 검증</div>
+      <div>검증 대기 중… <span style="color:var(--faint)">앞의 검증이 끝나면 자동으로
+        시작합니다.</span></div>`;
+  }
   const failed = mine && job.state === "failed"
     ? `<div class="errbox" style="margin-top:6px">검증 실패: ${esc(job.error || "")}</div>` : "";
   const v = s.validation;
@@ -1172,7 +1177,8 @@ function renderYoutube(d) {
   ytData = d;
   // 검증이 도는 동안만 목록을 다시 읽는다 — 진행 상황과 끝난 결과를 보이려고
   clearTimeout(ytPoll);
-  if (d.validation_job?.state === "running") ytPoll = setTimeout(refreshYoutube, 5000);
+  if (d.validation_job?.state === "running" || (d.validation_queue || []).length)
+    ytPoll = setTimeout(refreshYoutube, 5000);
   $("#ytkey").innerHTML = d.llm_ready ? "" : `<div class="warnbox">분석하려면
     GEMINI_API_KEY 또는 OPENAI_API_KEY 환경변수가 필요합니다. 설정한 뒤 서버를
     다시 시작하세요. 저장된 전략을 켜고 끄는 것은 키 없이도 됩니다.</div>`;
@@ -1217,7 +1223,9 @@ async function ytExtract() {
     ytOpen.add(s.strategy_name);
     $("#yturl").value = "";
     $("#ytmsg").innerHTML = `<div class="empty">저장했습니다 — <b>${esc(s.strategy_name)}</b>.
-      꺼진 상태입니다. 내용을 확인하고 켜세요.</div>`;
+      ${s.validation_queued
+        ? "과거 검증을 자동으로 시작했습니다. 통과하면 토글을 눌러 켤 수 있습니다."
+        : "꺼진 상태입니다. 이 전략은 자동으로 검증할 수 없습니다."}</div>`;
   } catch (e) {
     $("#ytmsg").innerHTML = `<div class="errbox">${esc(e.message)}</div>`;
   } finally {
