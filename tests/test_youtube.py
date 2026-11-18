@@ -983,8 +983,11 @@ def test_the_list_keeps_archived_strategies_apart(client, cfg):
     store.archive("sma_trend", cfg)
     body = client.get("/api/youtube/strategies").json()
     assert [s["strategy_name"] for s in body["strategies"]] == ["keeper"]
-    assert body["archived"] == [{"strategy_name": "sma_trend", "timeframe": "1h",
-                                 "source_url": URL, "net_r": -0.12, "trades": None}]
+    # 보관함은 규칙·검증 성적·영상 주소를 함께 보여 준다
+    kept = body["archived"]
+    assert [a["strategy_name"] for a in kept] == ["sma_trend"]
+    assert kept[0]["source_url"] == URL and kept[0]["validation"]["net_r"] == -0.12
+    assert kept[0]["entry_conditions"]["long"] and kept[0]["enabled"] is False
 
 
 # ─── 검증을 통과해야 켤 수 있다 ──────────────────────────────────

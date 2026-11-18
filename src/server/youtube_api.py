@@ -92,13 +92,8 @@ def youtube_strategies() -> dict[str, Any]:
         # 앞의 검증이 끝나기를 기다리는 전략 이름 (대입 직후 자동 검증의 대기 줄).
         "validation_queue": validation.queued(),
         # 손실로 검증돼 보관함으로 옮긴 전략. 목록에는 넣지 않고 따로 준다 —
-        # 화면은 접힌 한 줄로만 보여 준다.
-        "archived": [{"strategy_name": r["spec"]["strategy_name"],
-                      "timeframe": r["spec"]["timeframe"],
-                      "source_url": r["source_url"],
-                      "net_r": (r.get("validation") or {}).get("net_r"),
-                      "trades": (r.get("validation") or {}).get("trades")}
-                     for r in store.load_archived(cfg)],
+        # 화면의 보관함이 규칙·검증 성적·영상을 보여 준다.
+        "archived": [_view(r, interval) for r in store.load_archived(cfg)],
     }
 
 

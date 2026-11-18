@@ -1022,6 +1022,82 @@ function ytVoice(engineName, group) {
   return {voiced: votes.filter(v => v.has_voice).length, total: votes.length};
 }
 
+/* 전략이 무엇을 하는지 — 진입 수식, 지표, 수치화한 가정, 영상의 청산 규칙.
+   목록의 전략과 보관함의 전략이 같은 설명을 쓴다. */
+function ytSpecBody(s) {
+  const inds = (s.indicators_needed || []).map(i => {
+    const p = Object.entries(i.params || {}).map(([k, v]) => `${k}=${v}`).join(", ");
+    return `${i.name}(${p})`;
+  }).join(", ");
+  const ex = s.exit_conditions || {};
+  const exits = [
+    ex.take_profit_pct != null ? `익절 ${(ex.take_profit_pct * 100).toFixed(2)}%` : "",
+    ex.stop_loss_pct != null ? `손절 ${(ex.stop_loss_pct * 100).toFixed(2)}%` : "",
+    ex.indicator_exit || "",
+  ].filter(Boolean).join(" · ");
+  return `
+        <div class="ytk">롱 진입</div>
+        <code>${esc(s.entry_conditions?.long || "(없음)")}</code>
+        <div class="ytk">숏 진입</div>
+        <code>${esc(s.entry_conditions?.short || "(없음)")}</code>
+        <div class="ytk">지표 · ${esc(s.target_market)} · ${esc(s.timeframe || "봉 미언급")}</div>
+        <div>${esc(inds || "(없음)")}</div>
+        <div class="ytk">수치화한 가정</div>
+        ${(s.quant_assumptions || []).length
+          ? `<ul>${s.quant_assumptions.map(a => `<li>${esc(a)}</li>`).join("")}</ul>`
+          : "<div>(없음)</div>"}
+        <div class="ytk">영상의 청산 규칙 — 기록만, 엔진은 ATR 손절·목표를 씁니다</div>
+        <div>${esc(exits || "(없음)")}</div>
+        <div class="ytk">조건이 참이 된 뒤 ${ytData.hold_bars}봉(${esc(s.timeframe || ytData.engine_interval)}봉 기준) 동안 그 방향을 유지합니다</div>`;
+}
+
+/* ───────── 보관함 ─────────
+   수익 검증에 실패한 전략. 투표에는 들어가지 않지만 무엇을 시험했고 어떤 성적이
+   나왔는지, 원래 영상이 무엇이었는지는 여기서 다시 볼 수 있다. */
+function ytVideoId(url) {
+  // 저장 파일은 손으로 고칠 수 있다. 유튜브 영상 주소일 때만 재생한다.
+  const m = /^https:\/\/www\.youtube\.com\/watch\?v=([\w-]{11})$/.exec(String(url || ""));
+  return m ? m[1] : null;
+}
+
+/* 플레이어는 목록 밖에 둔다 — 목록은 검증이 도는 동안 5초마다 다시 그려지는데,
+   그 안에 있으면 영상이 그때마다 처음으로 돌아간다. */
+function ytPlay(id, name) {
+  if (!$("#ytplayer")) $("#ytlist").insertAdjacentHTML("afterend", `<div id="ytplayer"></div>`);
+  $("#ytplayer").innerHTML = `
+    <div class="ytk" style="display:flex;align-items:center;gap:8px;margin-top:10px">
+      <span style="flex:1">영상 · ${esc(name)}</span>
+      <button class="btn" onclick="$('#ytplayer').innerHTML = ''">닫기</button></div>
+    <iframe src="https://www.youtube-nocookie.com/embed/${id}" title="${esc(name)}"
+      style="width:100%;aspect-ratio:16/9;border:1px solid var(--line);border-radius:6px;margin-top:6px"
+      allow="encrypted-media; picture-in-picture; fullscreen" allowfullscreen
+      referrerpolicy="strict-origin-when-cross-origin"></iframe>`;
+  $("#ytplayer").scrollIntoView({block: "nearest"});
+}
+
+function ytArchivedRow(s) {
+  const name = esc(s.strategy_name), v = s.validation || {};
+  const id = ytVideoId(s.source_url);
+  return `
+    <details class="yt" ${ytOpen.has("a:" + s.strategy_name) ? "open" : ""}
+        ontoggle="this.open ? ytOpen.add('a:${name}') : ytOpen.delete('a:${name}')">
+      <summary>
+        <b title="${name}">${name}</b>
+        ${v.net_r != null ? `<span class="ytst bad" title="과거 검증: 비용을 뺀 거래당 기대값">${
+          rText(v.net_r)}</span>` : ""}
+        <span class="ytst">${(v.trades ?? 0).toLocaleString()}건</span>
+      </summary>
+      <div class="ytbody">
+        ${ytSpecBody(s)}
+        ${ytValidation(s)}
+        ${id ? `<div class="btns">
+          <button class="btn" onclick="ytPlay('${id}', '${name}')">영상 재생</button>
+          <a class="btn" href="${esc(s.source_url)}" target="_blank" rel="noopener">새 탭에서 열기</a>
+        </div>` : ""}
+      </div>
+    </details>`;
+}
+
 function ytRow(s) {
   const name = esc(s.strategy_name);
   const banned = (ytData.banned || []).includes(s.engine_name);
@@ -1039,16 +1115,6 @@ function ytRow(s) {
     : short ? ["켜짐 · 단기 군", "on"]
     : voice ? [`발언권 ${voice.voiced}/${voice.total} 종목`, voice.voiced ? "on" : "warn"]
     : ["켜짐 · 다음 바퀴부터", "on"];
-  const inds = (s.indicators_needed || []).map(i => {
-    const p = Object.entries(i.params || {}).map(([k, v]) => `${k}=${v}`).join(", ");
-    return `${i.name}(${p})`;
-  }).join(", ");
-  const ex = s.exit_conditions || {};
-  const exits = [
-    ex.take_profit_pct != null ? `익절 ${(ex.take_profit_pct * 100).toFixed(2)}%` : "",
-    ex.stop_loss_pct != null ? `손절 ${(ex.stop_loss_pct * 100).toFixed(2)}%` : "",
-    ex.indicator_exit || "",
-  ].filter(Boolean).join(" · ");
   // 저장 파일은 손으로 고칠 수 있다. 유튜브 주소가 아니면 링크로 만들지 않는다.
   const link = String(s.source_url || "").startsWith("https://www.youtube.com/watch?v=")
     ? `<a class="btn" href="${esc(s.source_url)}" target="_blank" rel="noopener">영상</a>` : "";
@@ -1079,19 +1145,7 @@ function ytRow(s) {
           마감될 때만 판단이 바뀝니다.</div>`
         : !s.timeframe ? `<div class="ytk">영상이 시간봉을 말하지 않아 엔진 봉
           (${esc(ytData.engine_interval)})을 씁니다.</div>` : ""}
-        <div class="ytk">롱 진입</div>
-        <code>${esc(s.entry_conditions?.long || "(없음)")}</code>
-        <div class="ytk">숏 진입</div>
-        <code>${esc(s.entry_conditions?.short || "(없음)")}</code>
-        <div class="ytk">지표 · ${esc(s.target_market)} · ${esc(s.timeframe || "봉 미언급")}</div>
-        <div>${esc(inds || "(없음)")}</div>
-        <div class="ytk">수치화한 가정</div>
-        ${(s.quant_assumptions || []).length
-          ? `<ul>${s.quant_assumptions.map(a => `<li>${esc(a)}</li>`).join("")}</ul>`
-          : "<div>(없음)</div>"}
-        <div class="ytk">영상의 청산 규칙 — 기록만, 엔진은 ATR 손절·목표를 씁니다</div>
-        <div>${esc(exits || "(없음)")}</div>
-        <div class="ytk">조건이 참이 된 뒤 ${ytData.hold_bars}봉(${esc(s.timeframe || ytData.engine_interval)}봉 기준) 동안 그 방향을 유지합니다</div>
+        ${ytSpecBody(s)}
         ${ytValidation(s)}
         <div class="btns">${link}
           <button class="btn" onclick="ytValidate('${name}')"
@@ -1191,14 +1245,14 @@ function renderYoutube(d) {
   const moved = job.state === "done" && job.archived
     ? `<div class="ytnote"><b>${esc(job.name)}</b> — 검증 결과 손실(${
         job.net_r != null ? rText(job.net_r) : ""})이라 보관함으로 옮겼습니다.</div>` : "";
-  const shelf = kept.length ? `<details class="yt"><summary>
-      <b style="font-weight:400;color:var(--faint)">손실로 보관된 전략 ${kept.length}개</b>
-    </summary><div class="ytbody">${kept.map(a => `<div>${esc(a.strategy_name)}
-      <span class="neg">${a.net_r != null ? rText(a.net_r) : ""}</span>
-      <span style="color:var(--faint)">${esc(a.timeframe || "")}봉 ·
-        ${(a.trades ?? 0).toLocaleString()}건</span></div>`).join("")}
-      <div style="color:var(--faint);font-size:10.5px;margin-top:4px">투표에 들어가지
-        않습니다. 파일은 runs/youtube/archive 에 있습니다.</div></div></details>` : "";
+  const shelf = kept.length ? `<details class="yt" ${ytOpen.has("__archive") ? "open" : ""}
+      ontoggle="this.open ? ytOpen.add('__archive') : ytOpen.delete('__archive')"><summary>
+      <b style="color:var(--faint)">보관함 · 수익 검증에 실패한 전략 ${kept.length}개</b>
+    </summary><div class="ytbody">
+      <div style="color:var(--faint);font-size:10.5px;margin-bottom:4px">투표에 들어가지
+        않습니다. 전략을 누르면 규칙과 검증 성적을 보고 영상을 재생할 수 있습니다.
+        파일은 runs/youtube/archive 에 있습니다.</div>
+      ${kept.map(ytArchivedRow).join("")}</div></details>` : "";
   $("#ytlist").innerHTML = (d.strategies.length
     ? d.strategies.map(ytRow).join("")
     : `<div class="empty">저장된 전략이 없습니다.</div>`) + moved + shelf;
