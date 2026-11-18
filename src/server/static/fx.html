@@ -310,6 +310,7 @@
       <label class="ytopt"><input type="checkbox" id="ytover">
         같은 이름이 있으면 덮어쓰기</label>
       <div id="ytmsg"></div>
+      <div id="ytshelf"></div>
       <div id="ytlist"><div class="empty">확인 중…</div></div>
       <div class="ytnote">켠 전략은 엔진의 다음 바퀴부터 투표합니다. 발언권은 최근
         학습 구간 성적이 정하고, 거래가 적거나 기대 R 이 0 이하면 0 입니다.</div>
@@ -1063,7 +1064,7 @@ function ytVideoId(url) {
 /* 플레이어는 목록 밖에 둔다 — 목록은 검증이 도는 동안 5초마다 다시 그려지는데,
    그 안에 있으면 영상이 그때마다 처음으로 돌아간다. */
 function ytPlay(id, name) {
-  if (!$("#ytplayer")) $("#ytlist").insertAdjacentHTML("afterend", `<div id="ytplayer"></div>`);
+  if (!$("#ytplayer")) $("#ytshelf").insertAdjacentHTML("afterend", `<div id="ytplayer"></div>`);
   $("#ytplayer").innerHTML = `
     <div class="ytk" style="display:flex;align-items:center;gap:8px;margin-top:10px">
       <span style="flex:1">영상 · ${esc(name)}</span>
@@ -1073,6 +1074,11 @@ function ytPlay(id, name) {
       allow="encrypted-media; picture-in-picture; fullscreen" allowfullscreen
       referrerpolicy="strict-origin-when-cross-origin"></iframe>`;
   $("#ytplayer").scrollIntoView({block: "nearest"});
+}
+
+function ytToggleShelf() {
+  ytOpen.has("__archive") ? ytOpen.delete("__archive") : ytOpen.add("__archive");
+  renderYoutube(ytData);
 }
 
 function ytArchivedRow(s) {
@@ -1245,17 +1251,21 @@ function renderYoutube(d) {
   const moved = job.state === "done" && job.archived
     ? `<div class="ytnote"><b>${esc(job.name)}</b> — 검증 결과 손실(${
         job.net_r != null ? rText(job.net_r) : ""})이라 보관함으로 옮겼습니다.</div>` : "";
-  const shelf = kept.length ? `<details class="yt" ${ytOpen.has("__archive") ? "open" : ""}
-      ontoggle="this.open ? ytOpen.add('__archive') : ytOpen.delete('__archive')"><summary>
-      <b style="color:var(--faint)">보관함 · 수익 검증에 실패한 전략 ${kept.length}개</b>
-    </summary><div class="ytbody">
-      <div style="color:var(--faint);font-size:10.5px;margin-bottom:4px">투표에 들어가지
-        않습니다. 전략을 누르면 규칙과 검증 성적을 보고 영상을 재생할 수 있습니다.
-        파일은 runs/youtube/archive 에 있습니다.</div>
-      ${kept.map(ytArchivedRow).join("")}</div></details>` : "";
+  // 보관함은 목록 위의 버튼으로 연다. 목록 맨 아래의 흐린 한 줄은 찾기 어려웠다.
+  const shelfOpen = ytOpen.has("__archive");
+  $("#ytshelf").innerHTML = kept.length ? `
+    <div class="btns" style="margin:8px 0 2px">
+      <button class="btn" onclick="ytToggleShelf()">📦 보관함 (${kept.length}) ${
+        shelfOpen ? "닫기 ▲" : "열기 ▼"}</button></div>
+    ${shelfOpen ? `<div style="border:1px solid var(--line);border-radius:7px;
+        padding:4px 8px 8px;margin:4px 0 8px">
+      <div class="ytnote" style="margin-top:4px">수익 검증에 실패한 전략입니다. 투표에
+        들어가지 않습니다. 전략을 누르면 규칙과 검증 성적을 보고 영상을 재생할 수
+        있습니다. 파일은 runs/youtube/archive 에 있습니다.</div>
+      ${kept.map(ytArchivedRow).join("")}</div>` : ""}` : "";
   $("#ytlist").innerHTML = (d.strategies.length
     ? d.strategies.map(ytRow).join("")
-    : `<div class="empty">저장된 전략이 없습니다.</div>`) + moved + shelf;
+    : `<div class="empty">저장된 전략이 없습니다.</div>`) + moved;
 }
 
 async function refreshYoutube() {
