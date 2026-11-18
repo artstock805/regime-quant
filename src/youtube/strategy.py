@@ -206,6 +206,9 @@ def _enabled(cfg: Config, group: str) -> list[YoutubeStrategy]:
     return [YoutubeStrategy(record["spec"])
             for record in store.load_all(cfg)
             if record["enabled"]
+            # 파일에 enabled 가 남아 있어도 넣지 않는다. 이 규칙이 생기기 전에 켜 둔
+            # 전략과 손으로 고친 파일이 여기서 걸린다.
+            and not store.blocked_by_validation(record)
             and strategy_group(record["spec"]["timeframe"], base) == group]
 
 

@@ -141,9 +141,36 @@ def save(spec: dict, source_url: str, *, overwrite: bool = False,
     return record
 
 
+class BlockedError(StoreError):
+    """과거 검증에서 손실로 나온 전략이라 켤 수 없다."""
+
+
+def blocked_by_validation(record: dict) -> bool:
+    """
+    과거 검증에서 **비용 후 기대값이 음수**로 나온 전략인가. 그런 전략은 켤 수 없고
+    투표에도 들어가지 않는다.
+
+    엔진의 발언권은 최근 6개월 성적으로 정해진다. 6개월은 짧아서, 9년 내내 잃은
+    전략도 최근 운이 좋았던 통화쌍·국면에서는 발언권을 얻는다(실제로 그랬다).
+    긴 검증이 손실이라고 말했으면 그쪽을 믿는다.
+
+    검증하지 않은 전략은 막지 않는다 — 모르는 것과 나쁜 것은 다르다. 거래가 너무
+    적어 판정하지 못한 전략(net_r 가 없다)도 막지 않는다.
+    같은 이름으로 다시 분석하면 검증 결과가 지워지므로 다시 켤 수 있다.
+    """
+    result = record.get("validation") or {}
+    net = result.get("net_r")
+    return isinstance(net, (int, float)) and not isinstance(net, bool) and net < 0
+
+
 def set_enabled(name: str, enabled: bool, cfg: Config | None = None) -> dict:
     with _write_lock:
-        record = {**get(name, cfg), "enabled": bool(enabled)}
+        current = get(name, cfg)
+        if enabled and blocked_by_validation(current):
+            raise BlockedError(
+                f"{name} 은 과거 검증에서 손실({current['validation']['net_r']:+.3f}R)로 "
+                "나와 켤 수 없습니다. 다시 분석해 규칙이 바뀌면 켤 수 있습니다")
+        record = {**current, "enabled": bool(enabled)}
         _write(_path(name, cfg), record)
     return record
 
@@ -160,7 +187,12 @@ def set_validation(name: str, result: dict, cfg: Config | None = None) -> bool:
         record = get(name, cfg)
         if record["created_at"] != result.get("spec_created_at"):
             return False
-        _write(_path(name, cfg), {**record, "validation": result})
+        updated = {**record, "validation": result}
+        if blocked_by_validation(updated):
+            # 손실로 나왔으면 그 자리에서 끈다. 켜진 채 "차단됨"이라고만 표시하면
+            # 화면의 토글과 실제 상태가 어긋난다.
+            updated["enabled"] = False
+        _write(_path(name, cfg), updated)
     return True
 
 

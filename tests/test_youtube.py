@@ -731,10 +731,10 @@ def test_a_one_minute_strategy_cannot_be_validated(vcfg):
 
 def test_a_result_survives_toggling_but_not_a_rewrite(vcfg):
     record = store.save(raw_spec(), URL, cfg=vcfg)
-    result = {"net_r": -0.05, "spec_created_at": record["created_at"]}
+    result = {"net_r": 0.05, "spec_created_at": record["created_at"]}
     assert store.set_validation("sma_trend", result, vcfg) is True
     store.set_enabled("sma_trend", True, vcfg)
-    assert store.get("sma_trend", vcfg)["validation"]["net_r"] == -0.05
+    assert store.get("sma_trend", vcfg)["validation"]["net_r"] == 0.05
 
     # 다시 분석해 덮어쓰면 규칙이 달라질 수 있다 — 옛 성적표를 달고 있으면 안 된다
     store.save(raw_spec(), URL, overwrite=True, cfg=vcfg)
@@ -808,6 +808,78 @@ def test_the_validate_endpoint_needs_a_json_body(client, cfg, monkeypatch):
     listed = client.get("/api/youtube/strategies").json()
     assert listed["validation_job"] == {"state": "idle"}
     assert listed["strategies"][0]["validation"] is None
+
+
+# ─── 과거 검증에서 손실이면 켤 수 없다 ───────────────────────────
+
+def judged(cfg, net_r, name="sma_trend", **spec_over) -> None:
+    record = store.save(raw_spec(strategy_name=name, **spec_over), URL, cfg=cfg)
+    result = {"net_r": net_r, "verdict": "x", "spec_created_at": record["created_at"]}
+    assert store.set_validation(name, result, cfg) is True
+
+
+@pytest.mark.parametrize("net_r, blocked", [(-0.001, True), (-0.12, True), (0.0, False),
+                                            (0.03, False), (None, False)])
+def test_only_a_loss_after_costs_blocks_a_strategy(vcfg, net_r, blocked):
+    """판정하지 못한 것(None)과 검증하지 않은 것은 막지 않는다 — 모르는 것과 나쁜 것은 다르다."""
+    judged(vcfg, net_r)
+    assert store.blocked_by_validation(store.get("sma_trend", vcfg)) is blocked
+    store.save(raw_spec(strategy_name="unjudged"), URL, cfg=vcfg)
+    assert store.blocked_by_validation(store.get("unjudged", vcfg)) is False
+
+
+def test_a_losing_strategy_cannot_be_switched_on(vcfg):
+    judged(vcfg, -0.12)
+    with pytest.raises(store.BlockedError, match="손실"):
+        store.set_enabled("sma_trend", True, vcfg)
+    assert store.get("sma_trend", vcfg)["enabled"] is False
+    store.set_enabled("sma_trend", False, vcfg)          # 끄는 것은 언제나 된다
+
+
+def test_a_strategy_that_was_on_is_switched_off_when_it_turns_out_to_lose(vcfg):
+    record = store.save(raw_spec(), URL, cfg=vcfg)
+    store.set_enabled("sma_trend", True, vcfg)
+    store.set_validation("sma_trend", {"net_r": -0.05,
+                                       "spec_created_at": record["created_at"]}, vcfg)
+    assert store.get("sma_trend", vcfg)["enabled"] is False
+    assert enabled_strategies(vcfg) == []
+
+
+def test_a_passing_result_leaves_the_switch_alone(vcfg):
+    record = store.save(raw_spec(), URL, cfg=vcfg)
+    store.set_enabled("sma_trend", True, vcfg)
+    store.set_validation("sma_trend", {"net_r": 0.04,
+                                       "spec_created_at": record["created_at"]}, vcfg)
+    assert [s.name for s in enabled_strategies(vcfg)] == ["yt_sma_trend"]
+
+
+def test_the_engine_ignores_a_blocked_strategy_even_if_the_file_says_enabled(vcfg):
+    """이 규칙이 생기기 전에 켜 둔 전략, 손으로 고친 파일."""
+    judged(vcfg, -0.12)
+    judged(vcfg, -0.2, name="quarter", timeframe="15m")
+    for name in ("sma_trend", "quarter"):
+        path = store.directory(vcfg) / f"{name}.json"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["enabled"] = True
+        path.write_text(json.dumps(raw), encoding="utf-8")
+    from src.youtube import short_strategies
+    assert enabled_strategies(vcfg) == [] and short_strategies(vcfg) == []
+
+
+def test_rewriting_the_strategy_lifts_the_block(vcfg):
+    judged(vcfg, -0.12)
+    store.save(raw_spec(), URL, overwrite=True, cfg=vcfg)   # 규칙이 달라졌을 수 있다
+    assert store.set_enabled("sma_trend", True, vcfg)["enabled"] is True
+
+
+def test_the_api_refuses_and_reports_the_block(client, cfg):
+    judged(cfg, -0.12)
+    refused = client.post("/api/youtube/strategies/sma_trend/enable", json={"on": True})
+    assert refused.status_code == 409 and "손실" in refused.json()["detail"]
+    row = client.get("/api/youtube/strategies").json()["strategies"][0]
+    assert row["blocked"] is True and row["enabled"] is False
+    assert client.post("/api/youtube/strategies/sma_trend/enable",
+                       json={"on": False}).status_code == 200
 
 
 # ─── 영상이 말하지 않은 방향은 만들지 않는다 ─────────────────────

@@ -1027,8 +1027,10 @@ function ytRow(s) {
   const banned = (ytData.banned || []).includes(s.engine_name);
   const short = s.group === "short";
   const voice = s.enabled && !banned && s.group ? ytVoice(s.engine_name, s.group) : null;
+  // 과거 검증에서 손실로 나온 전략은 켤 수 없다. 서버도 거부하고 엔진도 넣지 않는다.
   const [status, cls] =
-      !s.enabled ? [short ? "꺼짐 · 단기 군" : "꺼짐", ""]
+      s.blocked ? ["차단 · 과거 검증 손실", "bad"]
+    : !s.enabled ? [short ? "꺼짐 · 단기 군" : "꺼짐", ""]
     : banned ? ["금지목록에 있어 제외", "warn"]
     : !s.group ? ["적용 불가", "warn"]
     : voice && short ? [`단기 · 발언권 ${voice.voiced}/${voice.total}`, voice.voiced ? "on" : "warn"]
@@ -1052,7 +1054,9 @@ function ytRow(s) {
     <details class="yt" ${ytOpen.has(s.strategy_name) ? "open" : ""}
         ontoggle="this.open ? ytOpen.add('${name}') : ytOpen.delete('${name}')">
       <summary>
-        <input type="checkbox" ${s.enabled ? "checked" : ""} title="투표에 넣기"
+        <input type="checkbox" ${s.enabled && !s.blocked ? "checked" : ""}
+               ${s.blocked ? "disabled" : ""}
+               title="${s.blocked ? "과거 검증에서 손실로 나와 켤 수 없습니다" : "투표에 넣기"}"
                onchange="ytToggle('${name}', this.checked)">
         <b title="${name}">${name}</b>
         ${s.validation && s.validation.net_r != null ? `<span class="ytst ${
@@ -1141,7 +1145,10 @@ function ytValidation(s) {
       title="${y.year}년 · ${y.trades}건">'${String(y.year).slice(2)} ${
       y.r >= 0 ? "+" : ""}${y.r.toFixed(2)}</span>`).join(" ")}</div>
     <div style="color:var(--faint);font-size:10.5px">진입 조건만 검증합니다. 청산은
-      이 앱의 방식(손절 ${v.stop_mult}×ATR, 손익비 ${v.reward_ratio})입니다.</div>${failed}`;
+      이 앱의 방식(손절 ${v.stop_mult}×ATR, 손익비 ${v.reward_ratio})입니다.</div>
+    ${s.blocked ? `<div class="warnbox" style="margin-top:6px">비용 후 손실이라
+      <b>투표에서 뺐고 켤 수 없습니다.</b> 영상을 다시 분석해 규칙이 바뀌면 검증
+      결과가 지워지고 다시 켤 수 있습니다.</div>` : ""}${failed}`;
 }
 
 async function ytValidate(name) {
