@@ -773,6 +773,63 @@ def test_the_child_process_entry_saves_the_result(vcfg, monkeypatch):
     assert validation.read_status(vcfg)["state"] == "failed"
 
 
+def _verdicts(monkeypatch, trades_by_timeframe):
+    """시간봉마다 정해 둔 거래 수로 답하는 가짜 검증. 30건 미만이면 판정이 없다."""
+    asked = []
+
+    def fake_run(spec_, cfg, progress=None):
+        asked.append(spec_["timeframe"])
+        trades = trades_by_timeframe.get(spec_["timeframe"], 0)
+        return {"trades": trades, "net_r": 0.04 if trades >= 30 else None,
+                "interval": validation.interval_for(spec_, cfg), "pairs": 1}
+
+    monkeypatch.setattr(validation, "run", fake_run)
+    return asked
+
+
+def test_a_strategy_without_a_timeframe_is_retried_on_other_bars(vcfg, monkeypatch):
+    """영상이 봉을 말하지 않았고 1시간봉에서 거래가 없으면 다른 봉으로 내려간다."""
+    spec_ = {**raw_spec(), "timeframe": None}
+    asked = _verdicts(monkeypatch, {"15m": 400, "5m": 9000})
+
+    result, chosen = validation.run_with_fallback(store.normalize(spec_), vcfg)
+    assert asked == [None, "1d", "30m", "15m"]        # 처음 판정이 난 봉에서 멈춘다
+    assert chosen == "15m" and result["timeframe_chosen"] == "15m"
+    assert [t["timeframe"] for t in result["tried"]] == ["1h", "1d", "30m", "15m"]
+
+
+def test_no_retry_when_the_video_named_a_timeframe_or_the_first_run_judged(vcfg, monkeypatch):
+    asked = _verdicts(monkeypatch, {None: 500})
+    named = store.normalize({**raw_spec(), "timeframe": "4h"})
+    assert validation.run_with_fallback(named, vcfg)[1] is None     # 영상이 말한 봉만
+    unnamed = store.normalize({**raw_spec(), "timeframe": None})
+    result, chosen = validation.run_with_fallback(unnamed, vcfg)
+    assert chosen is None and "tried" not in result                # 1시간봉에서 판정
+    assert asked == ["4h", None]
+
+
+def test_all_bars_without_a_verdict_leaves_the_timeframe_alone(vcfg, monkeypatch):
+    _verdicts(monkeypatch, {})
+    result, chosen = validation.run_with_fallback(
+        store.normalize({**raw_spec(), "timeframe": None}), vcfg)
+    assert chosen is None and result["net_r"] is None
+    assert len(result["tried"]) == 5
+
+
+def test_the_bar_found_by_validation_becomes_the_strategys_timeframe(vcfg, monkeypatch):
+    """엔진은 검증한 봉으로 전략을 돌려야 한다 — 30분 이하면 단기 군이다."""
+    from src.youtube.strategy import strategy_group
+    store.save({**raw_spec(), "timeframe": None}, URL, cfg=vcfg)
+    monkeypatch.setattr(validation, "load_config", lambda: vcfg)
+    _verdicts(monkeypatch, {"30m": 200})
+
+    assert validation.main(["sma_trend"]) == 0
+    saved = store.get("sma_trend", vcfg)
+    assert saved["spec"]["timeframe"] == "30m"
+    assert saved["validation"]["timeframe_chosen"] == "30m"
+    assert strategy_group(saved["spec"]["timeframe"], "1h") == "short"
+
+
 def test_only_one_validation_runs_at_a_time(vcfg, monkeypatch):
     class Alive:
         def poll(self):

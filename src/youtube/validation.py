@@ -213,6 +213,44 @@ def run(spec: dict, cfg: Config | None = None, *,
     }
 
 
+# ─── 시간봉을 말하지 않은 영상 ───────────────────────────────────
+#
+# 영상이 봉을 말하지 않으면 엔진 봉(1시간)으로 검증한다. 거기서 거래가 너무 적어
+# 판정하지 못하면 다른 봉으로 차례로 다시 돌린다 — 그 규칙이 어느 봉을 두고 한
+# 말인지 모르기 때문이다. **처음으로 판정이 나온 봉에서 멈춘다.** 성적이 가장 좋은
+# 봉을 고르지 않는다: 여러 봉을 돌려 좋은 것을 고르면 그 고르는 행위가 결과를
+# 부풀린다. 판정이 나온 봉은 전략의 시간봉으로 저장한다 — 엔진이 검증한 것과 같은
+# 봉으로 그 전략을 돌려야 검증이 의미가 있다.
+FALLBACK_TIMEFRAMES = ("1d", "30m", "15m", "5m")
+
+
+def run_with_fallback(spec: dict, cfg: Config, *,
+                      progress: Callable[[int, int, str, str | None], None] | None = None
+                      ) -> tuple[dict[str, Any], str | None]:
+    """
+    (판정, 고른 시간봉). 영상이 봉을 말했거나 첫 검증에서 판정이 났으면 고른 봉은 None.
+    progress 의 마지막 인자는 지금 시도하는 봉이다 (첫 검증은 None).
+    """
+    def attempt(candidate: dict, trying: str | None) -> dict[str, Any]:
+        return run(candidate, cfg, progress=(
+            (lambda i, n, symbol: progress(i, n, symbol, trying)) if progress else None))
+
+    first = attempt(spec, None)
+    if spec["timeframe"] is not None or first.get("net_r") is not None:
+        return first, None
+    tried = [{"timeframe": first["interval"], "trades": first["trades"]}]
+    for timeframe in FALLBACK_TIMEFRAMES:
+        try:
+            trial = attempt({**spec, "timeframe": timeframe}, timeframe)
+        except ValidationError:          # 그 봉의 과거 데이터를 받지 못했다
+            tried.append({"timeframe": timeframe, "trades": None})
+            continue
+        tried.append({"timeframe": timeframe, "trades": trial["trades"]})
+        if trial.get("net_r") is not None:
+            return {**trial, "tried": tried, "timeframe_chosen": timeframe}, timeframe
+    return {**first, "tried": tried}, None
+
+
 # ─── 별도 프로세스로 돌리기 ──────────────────────────────────────
 
 def _status_path(cfg: Config) -> Path:
@@ -348,10 +386,12 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config()
     try:
         record = store.get(name, cfg)
-        result = run(record["spec"], cfg, progress=lambda i, n, symbol: write_status(
-            cfg, name=name, state="running", done=i, total=n, symbol=symbol))
+        result, chosen = run_with_fallback(
+            record["spec"], cfg, progress=lambda i, n, symbol, trying: write_status(
+                cfg, name=name, state="running", done=i, total=n, symbol=symbol,
+                trying=trying))
         result["spec_created_at"] = record["created_at"]
-        if not store.set_validation(name, result, cfg):
+        if not store.set_validation(name, result, cfg, timeframe=chosen):
             raise ValidationError("검증하는 동안 전략이 바뀌어 결과를 버렸습니다")
         # 손실로 나왔으면 보관함으로 옮긴다. 목록에는 켤 수 있는 후보만 남긴다.
         lost = isinstance(result.get("net_r"), (int, float)) and result["net_r"] < 0

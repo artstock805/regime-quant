@@ -1180,7 +1180,8 @@ function ytValidation(s) {
   const mine = job.name === s.strategy_name;
   if (mine && job.state === "running") {
     return `<div class="ytk">과거 검증</div>
-      <div>검증 중… ${job.done ?? 0}/${job.total || "?"} ${esc(job.symbol || "")}
+      <div>검증 중… ${job.trying ? `<b>${esc(job.trying)}봉</b>으로 다시 · ` : ""}${
+        job.done ?? 0}/${job.total || "?"} ${esc(job.symbol || "")}
         <span style="color:var(--faint)">— 몇 분 걸립니다. 엔진은 계속 돕니다.</span></div>`;
   }
   if ((ytData.validation_queue || []).includes(s.strategy_name)) {
@@ -1200,11 +1201,19 @@ function ytValidation(s) {
   }
   const head = `<div class="ytk">과거 검증 · ${esc(v.from)} ~ ${esc(v.to)} ·
     ${v.pairs}종목 · ${esc(v.interval)}봉</div>`;
+  // 영상이 봉을 말하지 않으면 판정이 나올 때까지 다른 봉으로 내려가며 검증한다.
+  const tried = (v.tried || []).map(t =>
+    `${esc(t.timeframe)}봉 ${t.trades == null ? "데이터 없음" : t.trades.toLocaleString() + "건"}`).join(" → ");
   if (v.net_r == null) {
-    return `${head}<div>거래 ${v.trades}건 — 판정하기에 너무 적습니다.</div>${failed}`;
+    return `${head}<div>거래 ${v.trades}건 — 판정하기에 너무 적습니다.</div>
+      ${tried ? `<div style="color:var(--faint)">영상이 시간봉을 말하지 않아 차례로
+        시도했지만 어느 봉에서도 판정이 나오지 않았습니다: ${tried}</div>` : ""}${failed}`;
   }
   const cls = x => x >= 0 ? "pos" : "neg";
   return `${head}
+    ${v.timeframe_chosen ? `<div style="color:var(--faint)">영상이 시간봉을 말하지 않아
+      판정이 나오는 봉을 찾았습니다: ${tried}. 처음 판정이 난
+      <b>${esc(v.timeframe_chosen)}봉</b>을 이 전략의 시간봉으로 정했습니다.</div>` : ""}
     <div><b class="${cls(v.net_r)}">${rText(v.net_r)}</b> 비용 후 ·
       <span class="${cls(v.gross_r)}">${rText(v.gross_r)}</span> 비용 전 ·
       <b>${esc(v.verdict)}</b>${v.t != null ? ` (t ${v.t.toFixed(1)})` : ""}</div>

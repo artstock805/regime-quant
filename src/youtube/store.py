@@ -192,9 +192,13 @@ def set_enabled(name: str, enabled: bool, cfg: Config | None = None) -> dict:
     return record
 
 
-def set_validation(name: str, result: dict, cfg: Config | None = None) -> bool:
+def set_validation(name: str, result: dict, cfg: Config | None = None, *,
+                   timeframe: str | None = None) -> bool:
     """
     검증 결과를 전략에 붙인다. 붙였으면 True.
+
+    timeframe 을 주면 전략의 시간봉도 그것으로 바꾼다. 영상이 봉을 말하지 않아
+    검증이 판정이 나오는 봉을 찾았을 때다 — 엔진은 검증한 봉으로 전략을 돌려야 한다.
 
     검증은 몇 분이 걸린다. 그 사이 같은 이름으로 전략을 다시 분석해 덮어썼다면
     이 결과는 **옛 전략의 성적**이다 — 새 전략에 붙이면 본 적 없는 규칙에 남의
@@ -205,6 +209,10 @@ def set_validation(name: str, result: dict, cfg: Config | None = None) -> bool:
         if record["created_at"] != result.get("spec_created_at"):
             return False
         updated = {**record, "validation": result}
+        if timeframe is not None:
+            spec = {**record["spec"], "timeframe": timeframe}
+            validate(spec)
+            updated["spec"] = spec
         if blocked_by_validation(updated, cfg):
             # 손실로 나왔으면 그 자리에서 끈다. 켜진 채 "차단됨"이라고만 표시하면
             # 화면의 토글과 실제 상태가 어긋난다.
