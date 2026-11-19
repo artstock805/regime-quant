@@ -45,6 +45,7 @@ from ..strategies import build_all
 from ..youtube import enabled_strategies as youtube_strategies
 from ..youtube import short_interval, short_strategies
 from . import broker
+from . import defense as fx_defense
 from . import watchlist as fx_watchlist
 from .mt5 import MT5Error, bars, account, positions, symbol_info
 from .symbols import Pair
@@ -202,6 +203,10 @@ class FxTrader:
         self.state = EngineState()
         self._lock = threading.Lock()
         self._known: dict[str, dict] = {}
+        # 종목별로 마지막 마감봉이 급변동이었는지 (+1 상승, -1 하락, 0 아님)
+        self._shock: dict[str, int] = {}
+        # 종목별로 마지막 대응 주문을 낸 봉. 한 봉에 한 번만 대응한다.
+        self._defended: dict[str, str] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -222,6 +227,10 @@ class FxTrader:
     @property
     def allow_live(self) -> bool:
         return bool(self.cfg.get("fx.allow_live", False))
+
+    def defense(self) -> fx_defense.Rules:
+        """역행 대응 규칙 (마팅게일·양방 대응). 매 바퀴 설정에서 다시 읽는다."""
+        return fx_defense.rules(self.cfg)
 
     def watchlist(self) -> list[Pair]:
         """
@@ -506,6 +515,7 @@ class FxTrader:
         df = bars(pair.mt5, self.interval, self.bars_needed())
         if df.empty:
             return None
+        self._shock[pair.mt5] = fx_defense.shock(df, self.defense().shock_mult)
         feats = compute_all(df)
 
         # 이 통화쌍의 실제 비용. 봉마다 그때의 스프레드가 저장돼 있다.
@@ -533,19 +543,34 @@ class FxTrader:
 
     def _act(self, pair: Pair, sig: SymbolSignal, acct, ep: ExecParams) -> None:
         held = [p for p in self._known.values() if p["symbol"] == pair.mt5]
+        rules = self.defense()
+        # 역행 대응 중이면 한 종목에 여러 포지션이(양방 대응은 반대 방향으로도)
+        # 있다. 묶음의 방향은 첫 진입의 방향이다.
+        basket = fx_defense.basket_of(held, rules)
+        held_side = basket.side if basket else (held[0]["side"] if held else None)
 
         # 1) 청산이 먼저다. 자리를 비워야 다음 진입을 볼 수 있다.
         if held and (sig.action == "청산" or
                      (sig.direction != 0 and
-                      held[0]["side"] != ("LONG" if sig.direction > 0 else "SHORT"))):
+                      held_side != ("LONG" if sig.direction > 0 else "SHORT"))):
             for p in held:
                 self._close(p, "신호 청산")
+            # 닫힌 것만 장부에서 빠진다. **다 닫히지 않았으면 이번 바퀴는 여기까지** —
+            # 남은 것을 두고 새로 들어가면 한 종목에 주인이 다른 포지션이 섞인다.
+            # 묶음은 포지션이 여럿이라 하나가 안 닫히는 일이 전보다 흔하다.
+            if any(p["symbol"] == pair.mt5 for p in self._known.values()):
+                return
             held = []
 
-        if not self.state.running or sig.action not in ("롱진입", "숏진입"):
+        if not self.state.running:
             return
         if held:
-            return                    # 이미 들고 있다
+            # 이미 들고 있다. 새로 들어가지 않고, 묶음이 역행했으면 대응한다.
+            if basket is not None:
+                self._defend(pair, basket, sig, acct, ep)
+            return
+        if sig.action not in ("롱진입", "숏진입"):
+            return
 
         side = "LONG" if sig.direction > 0 else "SHORT"
         if sig.stop_price is None or sig.risk_per_unit is None:
@@ -562,16 +587,23 @@ class FxTrader:
         si = symbol_info(pair.mt5)
         notional = lots * si.contract_size * sig.close
         decision = self.guard.check_entry(
-            balance=acct.balance, open_positions=len(self._known),
+            balance=acct.balance, open_positions=self._baskets(),
             notional=notional, symbol=pair.canonical)
         if not decision:
             self._blocked(pair, decision.reason)
             return
 
         tag_value = broker.tag(pair.mt5, sig.bar_time, self.group.code)
+        stop = sig.stop_price
+        if rules.enabled:
+            # 수량은 손절 거리 1배에 맞춘 그대로 두고, **손절만 멀리 건다** —
+            # 추가 진입을 다 한 뒤 한 단계 더 간 자리다. 그 사이는 _defend 가 맡는다.
+            sign = 1 if side == "LONG" else -1
+            stop = sig.close - sign * (rules.max_adds + 1) * sig.risk_per_unit
+            tag_value += fx_defense.BASE
         try:
             fill = broker.open_position(
-                pair.mt5, side, lots, sig.stop_price, sig.target_price,
+                pair.mt5, side, lots, stop, sig.target_price,
                 tag_value=tag_value, allow_live=self.allow_live)
         except MT5Error as exc:
             self.journal.write("reject", symbol=pair.canonical, side=side,
@@ -582,8 +614,8 @@ class FxTrader:
         self._known[str(fill.ticket)] = {
             "ticket": fill.ticket, "symbol": pair.mt5, "side": side,
             "volume": fill.volume, "entry_price": fill.price,
-            "stop_loss": fill.stop_loss, "comment": tag_value,
-            "magic": broker.MAGIC,
+            "stop_loss": fill.stop_loss, "take_profit": fill.take_profit,
+            "comment": tag_value, "magic": broker.MAGIC,
         }
         row = {**fill.as_dict(), "canonical": pair.canonical,
                "tradingview": pair.tradingview, "score": sig.score,
@@ -593,6 +625,109 @@ class FxTrader:
                "strategies": entry_votes(sig)}
         self.state.opened.append(row)
         self.journal.write("order", **row)
+
+    # ─── 역행 대응 ───────────────────────────────────────────────
+
+    def _baskets(self) -> int:
+        """
+        들고 있는 **종목 수.** 동시 보유 한도는 종목을 세는 것이다 — 역행 대응으로
+        한 종목에 포지션이 여럿 쌓여도 한 자리만 쓴다.
+        """
+        return len({p["symbol"] for p in self._known.values()})
+
+    def _defend(self, pair: Pair, basket: fx_defense.Basket, sig: SymbolSignal,
+                acct, ep: ExecParams) -> None:
+        """
+        묶음이 다음 단계까지 역행했으면 대응한다 (src/fx/defense.py).
+
+        양방 대응이 열려 있으면 손실이 묶여 있으므로 더 하지 않는다. 추가 진입을
+        다 썼으면 브로커에 걸린 최종 손절이 맡는다.
+        """
+        if basket.hedge is not None or basket.level >= basket.rules.max_adds:
+            return
+        if not basket.reached(sig.close):
+            return
+        # **한 봉에 한 번만.** 봉이 두 단계를 건너뛰었을 때 화면의 "한 바퀴"를 같은
+        # 봉에서 또 누르면, 같은 마감 가격으로 다음 단계까지 닿았다고 읽어 4배를
+        # 더 싣는다. 다음 단계는 다음 봉이 마감한 뒤에 본다.
+        if self._defended.get(pair.mt5) == str(sig.bar_time):
+            return
+        si = symbol_info(pair.mt5)
+        if self._shock.get(pair.mt5, 0) == -basket.sign:
+            # 급변동으로 밀렸다. 물량을 늘리지 않고 반대로 같은 수량을 열어 묶는다.
+            # 한 단계 되돌리면 이 포지션이 손절되고 묶음만 남는다. 최종 손절까지
+            # 가면 묶음의 손실을 이 포지션의 이익이 상쇄한다.
+            lots = fx_defense.round_step(min(basket.volume, si.volume_max), si.volume_step)
+            self._defense_order(
+                pair, basket, sig, acct, si, kind="hedge", level=basket.level,
+                side="SHORT" if basket.side == "LONG" else "LONG", lots=lots,
+                stop=sig.close + basket.sign * basket.step, target=basket.final_stop,
+                tag_value=basket.tag(fx_defense.HEDGE))
+            return
+
+        level = basket.level + 1
+        lots = min(basket.next_volume(si.volume_step), si.volume_max)
+        fill = self._defense_order(
+            pair, basket, sig, acct, si, kind="martingale", level=level,
+            side=basket.side, lots=lots, stop=basket.final_stop, target=None,
+            tag_value=basket.tag(f"m{level}"))
+        if fill is not None:
+            self._retarget(basket, fill, ep)
+
+    def _defense_order(self, pair: Pair, basket: fx_defense.Basket, sig: SymbolSignal,
+                       acct, si, *, kind: str, level: int, side: str, lots: float,
+                       stop: float, target: float | None, tag_value: str):
+        """대응 주문 하나. 가드를 지나고, 장부에 무엇에 대한 대응인지 남긴다."""
+        if lots < si.volume_min:
+            self._blocked(pair, f"역행 대응 랏 {lots} 이 최소 {si.volume_min} 보다 작습니다")
+            return None
+        # 이 종목은 이미 한 자리를 쓰고 있다 — 자기 자신은 한도에서 뺀다.
+        decision = self.guard.check_entry(
+            balance=acct.balance, open_positions=self._baskets() - 1,
+            notional=lots * si.contract_size * sig.close, symbol=pair.canonical)
+        if not decision:
+            self._blocked(pair, f"역행 대응 보류 — {decision.reason}")
+            return None
+        try:
+            fill = broker.open_position(pair.mt5, side, lots, stop, target,
+                                        tag_value=tag_value, allow_live=self.allow_live)
+        except MT5Error as exc:
+            self.journal.write("reject", symbol=pair.canonical, side=side, lots=lots,
+                               defense=kind, message=str(exc))
+            return None
+
+        self.guard.record_order()
+        self._defended[pair.mt5] = str(sig.bar_time)
+        self._known[str(fill.ticket)] = {
+            "ticket": fill.ticket, "symbol": pair.mt5, "side": side,
+            "volume": fill.volume, "entry_price": fill.price,
+            "stop_loss": fill.stop_loss, "take_profit": fill.take_profit,
+            "comment": tag_value, "magic": broker.MAGIC,
+        }
+        row = {**fill.as_dict(), "canonical": pair.canonical,
+               "tradingview": pair.tradingview, "score": sig.score, "regime": sig.regime,
+               "strategies": [], "defense": kind, "level": level,
+               "basket": str(basket.base.get("comment", ""))}
+        self.state.opened.append(row)
+        self.journal.write("order", **row)
+        return fill
+
+    def _retarget(self, basket: fx_defense.Basket, fill, ep: ExecParams) -> None:
+        """
+        추가 진입 뒤 묶음 전체의 목표가를 옮긴다. 평균 단가가 내려왔으므로 처음
+        노렸던 수익 금액은 훨씬 가까운 가격에서 난다. 손절은 그대로 둔다.
+        """
+        target = basket.target(ep.reward_ratio, (fill.volume, fill.price))
+        for ticket in [int(p["ticket"]) for p in basket.legs] + [int(fill.ticket)]:
+            try:
+                broker.move_stop(ticket, basket.final_stop, target)
+            except MT5Error as exc:
+                # 목표가를 못 옮겨도 손절은 걸려 있다. 다음 추가 때 다시 시도된다.
+                self.journal.write("error", where="retarget", ticket=ticket,
+                                   message=str(exc))
+                continue
+            if str(ticket) in self._known:
+                self._known[str(ticket)]["take_profit"] = target
 
     def _close(self, pos: dict, reason: str) -> None:
         try:
@@ -629,6 +764,8 @@ class FxTrader:
             "interval": self.interval,
             "allow_live": self.allow_live,
             "verdict": VERDICT,
+            # 역행 대응(마팅게일·양방 대응) 설정. 화면이 켜져 있는지 보여 준다.
+            "defense": self.defense().as_dict(),
             "account": acct_d,
             "guard": self.guard.status(balance),
             "last_run": self.state.last_run,

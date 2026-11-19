@@ -491,6 +491,7 @@ function renderStatus(s) {
           ${p.take_profit ? ` · 목표 ${p.take_profit}` : ""}
           ${isFx ? "" : ' · <span style="color:var(--faint)">FX 아님 — 이 앱이 연 것이 아닙니다</span>'}</div>
         ${(p.strategies || []).length ? `<div class="d">전략 ${stratLabel(p.strategies, p.group, true)}</div>` : ""}
+        ${defenseLabel(p.defense) ? `<div class="d">${defenseLabel(p.defense)}</div>` : ""}
       </div>`;
     }).join("");
     document.querySelectorAll(".poscard[data-sym]").forEach(el => {
@@ -518,6 +519,15 @@ let bal = null, guardState = null, histSummary = null;
 
    비어 있으면 **모른다**는 뜻이다: 남의 앱·사람이 연 거래이거나, 이 기록을 남기기
    전에 연 것이다. 지금의 가중치로 추측해 채우지 않는다. */
+/* 역행 대응에서 이 포지션이 맡은 역할. 한 종목에 포지션이 여럿(반대 방향으로도)
+   떠 있으면 왜 그런지 보여야 한다. 보통 포지션이면 빈 문자열. */
+function defenseLabel(d) {
+  if (!d) return "";
+  if (d.kind === "add") return `<span class="src">마팅게일 ${d.level}차 추가</span>`;
+  if (d.kind === "hedge") return `<span class="src">양방 대응</span>`;
+  return `<span style="color:var(--faint)">역행 대응 대상</span>`;
+}
+
 function stratLabel(list, group, full) {
   if (!list || !list.length) return "";
   const name = v => v.korean || v.strategy;
@@ -839,7 +849,8 @@ async function refreshHistory() {
       <td>${r}</td>
       <td>${esc(held)}</td>
       <td class="l">${t.regime ? esc(REGIME_KO[t.regime] ?? t.regime) : ""}</td>
-      <td class="l">${stratLabel(t.strategies, t.group)}</td>
+      <td class="l">${stratLabel(t.strategies, t.group) ||
+        (t.defense && t.defense.kind !== "base" ? defenseLabel(t.defense) : "")}</td>
       <td class="l"><span class="src ${t.ours ? "mine" : ""} ${
         t.source && t.source.startsWith("magic") ? "unknown" : ""}">${
         esc(t.source_label || (t.ours ? "엔진" : "수동"))}</span>${
@@ -951,6 +962,11 @@ function renderEngine(st) {
     <div class="enginerow"><span class="k">봉</span><b>${esc(st.interval || "")}</b></div>
     ${engineLoopRow(st)}
     <div class="enginerow"><span class="k">감시 종목</span><b>${st.scanned ?? 0}</b></div>
+    <div class="enginerow"><span class="k">역행 대응</span>
+      <b title="손절 거리 1배 역행할 때마다 추가 진입합니다. 급변동으로 밀리면 추가하지 않고 같은 수량의 반대 포지션으로 묶습니다. 마지막 추가 뒤 한 단계 더 가면 묶음 전체가 손절됩니다.">${
+        st.defense?.enabled
+          ? `마팅게일 ${st.defense.max_adds}회 ×${st.defense.multiplier} · 급변동 시 양방`
+          : "꺼짐"}</b></div>
     <div class="enginerow"><span class="k">오늘 실현</span>
       <b>${(g.realised_today ?? 0).toFixed(2)}</b></div>
     ${st.last_error ? `<div class="errbox">${esc(st.last_error)}</div>` : ""}

@@ -107,6 +107,8 @@ def trader(tmp_path, monkeypatch):
 
     t = eng.FxTrader(journal=Journal(tmp_path / "j.jsonl"))
     monkeypatch.setattr(t, "watchlist", lambda: [PAIR])
+    # 여기는 기본 진입·청산을 본다. 역행 대응은 test_fx_defense.py 가 따로 본다.
+    monkeypatch.setattr(t, "defense", lambda: eng.fx_defense.Rules(enabled=False))
     t.sent, t.closed_calls = sent, closed
     return t
 

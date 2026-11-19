@@ -159,6 +159,8 @@ def desk(tmp_path, monkeypatch):
                          group=eng.SHORT)
     for t in (main, short):
         monkeypatch.setattr(t, "watchlist", lambda: [PAIR])
+        # 여기는 투표 군을 본다. 역행 대응은 test_fx_defense.py 가 따로 본다.
+        monkeypatch.setattr(t, "defense", lambda: eng.fx_defense.Rules(enabled=False))
         t.state.running = True
 
     def drive(trader, sig):
@@ -417,9 +419,12 @@ def test_entry_info_says_unknown_when_the_journal_has_no_record():
     """남의 앱·사람이 연 거래, 또는 이 기록을 남기기 전에 연 것. 추측해서 채우지 않는다."""
     from src.server.fx_api import _entry_info
     assert _entry_info(None, "rqEURUSD2506011200") == \
-        {"strategies": [], "strategy_names": "", "group": None}
+        {"defense": None, "strategies": [], "strategy_names": "", "group": None}
     assert _entry_info({"ticket": 1}, "rqEURUSD2506011200") == \
-        {"strategies": [], "strategy_names": "", "group": "main"}
+        {"defense": None, "strategies": [], "strategy_names": "", "group": "main"}
+    # 역행 대응의 역할은 태그에서 읽는다 — 장부 기록이 없어도 보인다
+    assert _entry_info(None, "rqEURUSD2506011200m2")["defense"] == {"kind": "add", "level": 2}
+    assert _entry_info(None, "rqEURUSD2506011200h")["defense"] == {"kind": "hedge", "level": 0}
 
 
 def test_entry_info_names_the_strategies_and_the_group():

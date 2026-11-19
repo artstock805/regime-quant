@@ -367,8 +367,14 @@ def _entry_info(order: dict | None, comment: str = "") -> dict[str, Any]:
     거래 — 남의 앱·사람 손, 또는 이 기록을 남기기 전에 연 것 — 는 모른다.
     모르는 것을 비워 둔다. 지금의 가중치로 추측해 채우면 그때의 이유가 아니다.
     """
+    from ..fx import defense
+
     votes = (order or {}).get("strategies") or []
+    role = defense.role({"comment": comment})
     return {
+        # 역행 대응에서의 역할 (src/fx/defense.py): base 첫 진입, add 마팅게일 추가,
+        # hedge 양방 대응. 표식이 없으면 null — 대응 대상이 아닌 보통 포지션이다.
+        "defense": {"kind": role[0], "level": role[1]} if role else None,
         "strategies": votes,
         # CSV 와 좁은 화면용 한 줄. 기여도 큰 순.
         "strategy_names": " + ".join(str(v.get("korean") or v.get("strategy")) for v in votes),
