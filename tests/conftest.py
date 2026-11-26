@@ -43,7 +43,11 @@ def _no_real_mt5():
 
 @pytest.fixture(autouse=True)
 def _stop_engine_loops(monkeypatch):
-    from src.fx import engine
+    from src.fx import engine, keepawake
+
+    # 엔진 루프는 도는 동안 PC 의 절전을 막는다. 테스트가 이 PC 의 전원 상태에
+    # 손대지 않게 한다 — 요청이 됐다고만 답한다.
+    monkeypatch.setattr(keepawake, "_set", lambda flags: True)
 
     started: list = []
     spawn = engine.FxTrader._spawn

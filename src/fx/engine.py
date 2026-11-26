@@ -46,6 +46,7 @@ from ..youtube import enabled_strategies as youtube_strategies
 from ..youtube import short_interval, short_strategies
 from . import broker
 from . import defense as fx_defense
+from . import keepawake
 from . import watchlist as fx_watchlist
 from .mt5 import MT5Error, bars, account, positions, symbol_info
 from .symbols import Pair
@@ -179,6 +180,8 @@ class FxTrader:
     # 클래스 기본값으로도 둔다. __init__ 을 거치지 않는 대역(테스트의 FakeEngine)이
     # 군 없이 만들어져도 기본 군으로 동작해야 한다.
     group: Group = MAIN
+    # 루프가 절전 방지를 쥐고 있는가 (루프 스레드가 세우고 내린다)
+    _awake: bool = False
 
     def __init__(self, cfg: Config | None = None,
                  journal: Journal | None = None,
@@ -405,6 +408,19 @@ class FxTrader:
         return df.index[-1].isoformat()
 
     def _loop(self) -> None:
+        """
+        루프 스레드의 몸통. **도는 동안 PC 가 절전에 들어가지 않게 한다**
+        (src/fx/keepawake.py). 절전 중에는 엔진이 서고, 그러면 진입도 신호 청산도
+        역행 대응도 멈춘다. 요청은 이 스레드에 묶여 있어 루프가 끝나면 풀린다.
+        """
+        self._awake = keepawake.hold()
+        try:
+            self._poll()
+        finally:
+            keepawake.release()
+            self._awake = False
+
+    def _poll(self) -> None:
         """
         새 봉이 마감될 때마다 한 바퀴 돈다.
 
@@ -775,6 +791,9 @@ class FxTrader:
             # 0 에서 안 늘면 스케줄러가 죽은 것이다 — 예전에는 스케줄러가
             # 아예 없어서 "시작"을 눌러도 아무 일이 없었다.
             "loop_alive": bool(self._thread and self._thread.is_alive()),
+            # 루프가 도는 동안 PC 의 유휴 절전을 막고 있는가. Windows 가 아니거나
+            # 요청이 거부되면 False — 그때는 PC 가 잠들면 엔진도 선다.
+            "keep_awake": self._awake,
             "cycles": self.state.cycles,
             "checks": self.state.checks,
             "last_bar": self.state.last_bar,

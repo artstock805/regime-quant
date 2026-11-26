@@ -962,6 +962,9 @@ function renderEngine(st) {
     <div class="enginerow"><span class="k">봉</span><b>${esc(st.interval || "")}</b></div>
     ${engineLoopRow(st)}
     <div class="enginerow"><span class="k">감시 종목</span><b>${st.scanned ?? 0}</b></div>
+    <div class="enginerow"><span class="k">절전 방지</span>
+      <b title="엔진이 도는 동안 PC 가 저절로 절전에 들어가지 않게 합니다. 모니터는 평소처럼 꺼집니다. 노트북 덮개를 닫거나 직접 절전을 누르면 막지 못합니다. 엔진을 정지하면 풀립니다.">${
+        st.keep_awake ? "켜짐" : (on ? "꺼짐 — PC 가 잠들면 엔진도 멈춥니다" : "엔진 정지 중")}</b></div>
     <div class="enginerow"><span class="k">역행 대응</span>
       <b title="손절 거리 1배 역행할 때마다 추가 진입합니다. 급변동으로 밀리면 추가하지 않고 같은 수량의 반대 포지션으로 묶습니다. 마지막 추가 뒤 한 단계 더 가면 묶음 전체가 손절됩니다.">${
         st.defense?.enabled
