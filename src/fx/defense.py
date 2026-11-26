@@ -12,6 +12,9 @@
                같은 수량의 반대 포지션을 열어 손실을 그 자리에 묶는다.
     최종 손절  마지막 추가 뒤 한 단계 더 역행하면 묶음 전체가 손절된다. 이 손절은
                첫 진입 때부터 브로커에 걸려 있다 — 앱이 꺼져 있어도 지켜진다.
+               **선택 사항이다** (`final_stop`). 끄면 손절 없이 진입하고, 묶음은
+               목표가에 닿거나 신호가 닫을 때까지 열려 있다. 그때 손실에는
+               끝이 없다 — 막는 것은 브로커의 증거금 강제 청산뿐이다.
 
 **최악의 손실은 1R 이 아니다.** 첫 진입은 손절 거리 1배에 잔고의 risk_per_trade
 (1%)를 거는 크기 그대로다. 2배씩 3회 추가하고 최종 손절에 닿으면
@@ -40,6 +43,8 @@ import pandas as pd
 BASE = "m0"
 HEDGE = "h"
 _ROLE = re.compile(r"(?:m(\d)|h)$")
+# 단계 간격(포인트). 역할 표식 바로 앞에 온다: rqEURUSD2506011200p500m0
+_STEP = re.compile(r"p(\d+)(?:m\d|h)$")
 SHOCK_LOOKBACK = 14
 
 
@@ -49,6 +54,9 @@ class Rules:
     max_adds: int = 3
     multiplier: float = 2.0
     shock_mult: float = 2.0
+    # 최종 손절(강제 손절)을 거는가. 끄면 **손절 없이** 진입한다 — 마지막 추가
+    # 뒤에도 묶음은 목표가에 닿거나 신호가 닫을 때까지 열려 있다.
+    final_stop: bool = True
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -62,7 +70,20 @@ def rules(cfg) -> Rules:
                  # 단계는 태그에 한 자리 숫자로 남는다
                  max_adds=min(max(int(get("max_adds", 3)), 0), 9),
                  multiplier=max(float(get("multiplier", 2.0)), 1.0),
-                 shock_mult=float(get("shock_mult", 2.0)))
+                 shock_mult=float(get("shock_mult", 2.0)),
+                 final_stop=bool(get("final_stop", True)))
+
+
+def base_suffix(step: float, point: float) -> str:
+    """
+    첫 진입의 태그 끝에 붙일 표식 — **단계 간격**과 역할.
+
+    간격을 손절 가격에서 거꾸로 읽으면 손절을 걸지 않는 순간 읽을 곳이 없다.
+    그래서 진입할 때 간격을 포인트 단위로 태그에 적는다. 포지션의 comment 는
+    MT5 가 들고 있으므로 재시작해도, 손절이 없어도 그대로 읽힌다.
+    """
+    points = int(round(step / point)) if point > 0 else 0
+    return f"p{points}{BASE}" if points > 0 else BASE
 
 
 def role(pos: dict) -> tuple[str, int] | None:
@@ -108,6 +129,7 @@ class Basket:
     adds: tuple[dict, ...]
     hedge: dict | None
     rules: Rules
+    point: float = 0.0             # 이 종목의 1포인트 (태그의 간격을 가격으로 바꾼다)
 
     @property
     def side(self) -> str:
@@ -118,12 +140,24 @@ class Basket:
         return 1 if self.side == "LONG" else -1
 
     @property
-    def final_stop(self) -> float:
-        return float(self.base["stop_loss"])
+    def final_stop(self) -> float | None:
+        """묶음의 최종 손절. 손절 없이 연 묶음이면 None."""
+        stop = self.base.get("stop_loss")
+        return float(stop) if stop else None
 
     @property
     def step(self) -> float:
-        """단계 간격 = 손절 거리 1배 (1R 의 가격)."""
+        """
+        단계 간격 = 손절 거리 1배 (1R 의 가격). 모르면 0.
+
+        태그에 적힌 값을 먼저 쓴다. 태그에 없으면(간격을 적기 전에 연 묶음) 최종
+        손절에서 거꾸로 읽는다 — 손절 = 진입가 ∓ (max_adds+1) 간격.
+        """
+        found = _STEP.search(str(self.base.get("comment", "")).strip())
+        if found and self.point > 0:
+            return int(found.group(1)) * self.point
+        if self.final_stop is None:
+            return 0.0
         return abs(float(self.base["entry_price"]) - self.final_stop) / (self.rules.max_adds + 1)
 
     @property
@@ -169,10 +203,11 @@ class Basket:
         return average + self.sign * reward_ratio * self.step * float(self.base["volume"]) / total
 
 
-def basket_of(held: list[dict], rule: Rules) -> Basket | None:
+def basket_of(held: list[dict], rule: Rules, point: float = 0.0) -> Basket | None:
     """
     이 종목에 들고 있는 것에서 묶음을 읽는다. 대응할 묶음이 아니면 None —
-    기능이 꺼져 있거나, 첫 진입 표식이 없거나(예전 포지션), 손절이 없다.
+    기능이 꺼져 있거나, 첫 진입 표식이 없거나(예전 포지션), 단계 간격을 알 수
+    없다(태그에도 없고 손절도 없다).
     """
     if not rule.enabled:
         return None
@@ -180,9 +215,10 @@ def basket_of(held: list[dict], rule: Rules) -> Basket | None:
     if len(bases) != 1:
         return None
     base = bases[0]
-    if not base.get("stop_loss") or not base.get("entry_price"):
+    if not base.get("entry_price"):
         return None
     adds = sorted((p for p in held if (role(p) or ("", 0))[0] == "add"
                    and p["side"] == base["side"]), key=lambda p: role(p)[1])
     hedges = [p for p in held if role(p) == ("hedge", 0) and p["side"] != base["side"]]
-    return Basket(base, tuple(adds), hedges[0] if hedges else None, rule)
+    basket = Basket(base, tuple(adds), hedges[0] if hedges else None, rule, point)
+    return basket if basket.step > 0 else None

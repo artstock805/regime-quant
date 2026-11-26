@@ -361,6 +361,31 @@ def test_moving_the_stop_does_not_touch_the_position(fake):
     assert "volume" not in req, "손절만 옮기려는데 수량이 실렸다"
 
 
+# ─── 손절 없는 진입은 명시했을 때만 ──────────────────────────────
+
+def test_an_entry_goes_out_without_a_stop_only_when_none_is_spelled_out(fake):
+    """
+    역행 대응에서 최종 손절을 꺼 둔 경우다. 손절 인자는 여전히 필수라서 실수로
+    빠뜨릴 수는 없다 — 부르는 쪽이 None 을 적어야만 손절 없이 나간다.
+    """
+    fill = broker.open_position("EURUSD", "LONG", 0.1, None, 1.1100)
+    req = fake.requests[0]
+    assert "sl" not in req, "손절을 걸지 말라고 했는데 실렸다"
+    assert req["tp"] == pytest.approx(1.1100)
+    assert fill.stop_loss is None
+
+    with pytest.raises(TypeError):
+        broker.open_position("EURUSD", "LONG", 0.1)       # 손절을 빠뜨리면 주문이 안 나간다
+
+
+def test_moving_only_the_target_leaves_a_stopless_position_stopless(fake):
+    """MT5 는 손절과 목표가를 함께 다시 쓴다. 손절 0 이 '없음'이다."""
+    fake.positions["3"] = a_position(ticket=3)
+    broker.move_stop(3, None, 1.1040)
+    req = fake.requests[0]
+    assert req["sl"] == 0.0 and req["tp"] == pytest.approx(1.1040)
+
+
 # ─── 대조 ────────────────────────────────────────────────────────
 
 def test_reconcile_notices_a_position_that_closed_elsewhere(fake):

@@ -30,7 +30,7 @@ from src.fx.broker import Fill
 from test_fx_engine import DEMO, INFO, PAIR, Signal, fake_bars
 
 STEP = 0.0050                      # Signal 기본값: 종가 1.1000, 손절 1.0950
-BASE_TAG = "rqEURUSD2506011200m0"
+BASE_TAG = "rqEURUSD2506011200p500m0"    # p500 = 단계 간격 500포인트 (0.0050)
 
 
 class Book:
@@ -73,6 +73,17 @@ class Book:
 
 @pytest.fixture
 def desk(tmp_path, monkeypatch):
+    """최종 손절을 거는 설정."""
+    return make_desk(tmp_path, monkeypatch, final_stop=True)
+
+
+@pytest.fixture
+def nostop(tmp_path, monkeypatch):
+    """최종 손절을 꺼 둔 설정 — 손절 없이 진입한다."""
+    return make_desk(tmp_path, monkeypatch, final_stop=False)
+
+
+def make_desk(tmp_path, monkeypatch, *, final_stop: bool):
     book = Book()
     monkeypatch.setattr(eng, "account", lambda: DEMO)
     monkeypatch.setattr(eng, "symbol_info", lambda name: INFO)
@@ -89,7 +100,7 @@ def desk(tmp_path, monkeypatch):
     raw["fx"] = {**raw["fx"], "interval": "1h",
                  "watchlist_file": str(tmp_path / "wl.json"),
                  "defense": {"enabled": True, "max_adds": 3, "multiplier": 2.0,
-                             "shock_mult": 2.0}}
+                             "shock_mult": 2.0, "final_stop": final_stop}}
     trader = eng.FxTrader(cfg=Config(raw), journal=Journal(tmp_path / "j.jsonl"))
     monkeypatch.setattr(trader, "watchlist", lambda: [PAIR])
     trader.state.running = True
@@ -382,7 +393,121 @@ def test_defense_orders_are_journalled_with_what_they_answer(desk, monkeypatch):
 def test_the_status_shows_the_rules(desk):
     trader, _, _ = desk
     assert trader.status()["defense"] == {"enabled": True, "max_adds": 3,
-                                          "multiplier": 2.0, "shock_mult": 2.0}
+                                          "multiplier": 2.0, "shock_mult": 2.0,
+                                          "final_stop": True}
+
+
+# ─── 최종 손절은 선택 사항이다 ───────────────────────────────────
+
+def test_without_the_final_stop_the_entry_carries_no_stop(nostop):
+    _, book, drive = nostop
+    enter(drive)
+    (pos,) = book.live.values()
+    assert pos["stop_loss"] is None, "손절을 꺼 두었으면 걸지 않는다"
+    assert pos["comment"] == BASE_TAG, "단계 간격은 태그에 적는다 — 손절에서 읽을 수 없으니"
+    assert pos["take_profit"] == pytest.approx(1.1100) and pos["volume"] == 0.10
+
+
+def test_martingale_keeps_working_without_a_stop(nostop):
+    trader, book, drive = nostop
+    enter(drive)
+    for price in (1.0950, 1.0900, 1.0850):
+        drive(price)
+    legs = book.by_tag()
+    assert set(legs) == {"m0", "m1", "m2", "m3"}
+    assert [legs[k]["volume"] for k in ("m0", "m1", "m2", "m3")] == \
+        pytest.approx([0.10, 0.20, 0.40, 0.80])
+    assert all(p["stop_loss"] is None for p in book.live.values()), \
+        "추가분에도, 목표가를 옮길 때도 손절을 붙이지 않는다"
+    targets = {round(p["take_profit"], 6) for p in book.live.values()}
+    assert len(targets) == 1, "묶음 전체가 같은 목표가를 쓴다"
+
+
+def test_without_a_stop_nothing_closes_the_basket_after_the_last_add(nostop):
+    """마지막 추가 뒤에도 계속 밀린다. 더 싣지도 닫지도 않는다 — 그게 이 설정의 뜻이다."""
+    _, book, drive = nostop
+    enter(drive)
+    for price in (1.0950, 1.0900, 1.0850, 1.0790, 1.0700, 1.0500):
+        drive(price)
+    assert set(book.by_tag()) == {"m0", "m1", "m2", "m3"}
+
+
+def test_the_step_is_read_from_the_tag_after_a_restart(nostop):
+    """손절이 없으니 간격을 손절에서 읽을 수 없다. 태그에 있어야 재시작을 견딘다."""
+    trader, book, drive = nostop
+    enter(drive)
+    trader._known.clear()
+    drive(1.0951)
+    assert len(book.live) == 1, "간격(0.0050)에 닿기 전에는 추가하지 않는다"
+    drive(1.0950)
+    assert set(book.by_tag()) == {"m0", "m1"}
+
+
+def test_the_hedge_has_no_target_when_there_is_no_final_stop(nostop, monkeypatch):
+    _, book, drive = nostop
+    enter(drive)
+    monkeypatch.setattr(eng.fx_defense, "shock", lambda df, mult: -1)
+    drive(1.0940)
+    hedge = book.by_tag()["h"]
+    assert hedge["side"] == "SHORT" and hedge["volume"] == pytest.approx(0.10)
+    assert hedge["take_profit"] is None, "이익을 챙길 최종 손절 자리가 없다"
+    assert hedge["stop_loss"] == pytest.approx(1.0940 + STEP), "한 단계 되돌리면 풀린다"
+
+
+def test_a_basket_opened_with_a_stop_keeps_it_after_the_option_is_switched_off(nostop):
+    """
+    설정을 끄기 전에 연 묶음. 태그에 간격이 없고 손절이 걸려 있다 — 간격은 그
+    손절에서 읽고, 추가분도 그 손절을 함께 쓴다. 설정이 열린 포지션의 손절을
+    걷어 가지 않는다.
+    """
+    _, book, drive = nostop
+    book.open("EURUSD", "LONG", 0.10, 1.0800, 1.1100, tag_value="rqEURUSD2506011200m0")
+    drive(1.0950)
+    by_role = {p["comment"][-2:]: p for p in book.live.values()}
+    assert set(by_role) == {"m0", "m1"}
+    assert by_role["m1"]["stop_loss"] == pytest.approx(1.0800)
+    assert by_role["m0"]["stop_loss"] == pytest.approx(1.0800)
+
+
+def test_the_r_multiple_comes_from_the_recorded_risk_not_the_stop():
+    """손절을 멀리 걸거나 안 걸면 손절 가격으로는 1R 을 알 수 없다."""
+    from src.server.fx_api import _r_multiple
+    trade = {"exit_price": 1.1050, "side": "LONG", "entry_price": 1.1000}
+    assert _r_multiple(trade, {"price": 1.1000, "stop_loss": None,
+                               "risk_per_unit": 0.0050}) == 1.0
+    assert _r_multiple(trade, {"price": 1.1000, "stop_loss": 1.0800,
+                               "risk_per_unit": 0.0050}) == 1.0
+    assert _r_multiple({**trade, "side": "SHORT"},
+                       {"price": 1.1000, "stop_loss": None, "risk_per_unit": 0.0050}) == -1.0
+    # 예전 기록(1R 이 없다)은 손절 가격으로 계산한다
+    assert _r_multiple(trade, {"price": 1.1000, "stop_loss": 1.0950}) == 1.0
+    assert _r_multiple(trade, {"price": 1.1000, "stop_loss": None}) is None
+
+
+def test_the_entry_is_journalled_with_its_risk(nostop):
+    trader, _, drive = nostop
+    enter(drive)
+    drive(1.0950)
+    rows = trader.journal.tail(5, kinds=["order"])[::-1]
+    assert [r["risk_per_unit"] for r in rows] == pytest.approx([STEP, STEP])
+    assert rows[0]["stop_loss"] is None
+
+
+def test_the_final_stop_is_on_unless_switched_off():
+    assert defense.rules(Config({"fx": {"defense": {"enabled": True}}})).final_stop is True
+    off = defense.rules(Config({"fx": {"defense": {"final_stop": False}}}))
+    assert off.final_stop is False
+
+
+def test_the_step_travels_in_the_tag():
+    assert defense.base_suffix(0.0050, 0.00001) == "p500m0"
+    assert defense.base_suffix(1.5, 0.001) == "p1500m0"            # 엔 통화쌍
+    assert defense.base_suffix(0.0050, 0.0) == "m0", "포인트를 모르면 적지 않는다"
+    tag = broker.tag("EURUSD", "2025-06-01T12:00:00+00:00", broker.SHORT_CODE) + "p99999m3"
+    assert len(tag) <= 31, "간격을 적어도 comment 한도 안이다"
+    assert defense.role({"comment": "rqEURUSD2506011200p500m0"}) == ("base", 0)
+    assert defense.role({"comment": "rqEURUSD2506011200p500m2"}) == ("add", 2)
+    assert defense.role({"comment": "rqEURUSD2506011200p500h"}) == ("hedge", 0)
 
 
 # ─── 규칙 읽기 ───────────────────────────────────────────────────

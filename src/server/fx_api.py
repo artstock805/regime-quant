@@ -394,8 +394,15 @@ def _r_multiple(t: dict, order: dict | None) -> float | None:
     try:
         entry = float(order.get("price") or t["entry_price"])
         stop = float(order.get("stop_loss") or 0)
+        risk = float(order.get("risk_per_unit") or 0)
     except (TypeError, ValueError):
         return None
+
+    # 진입할 때 적어 둔 1R 이 있으면 그것을 쓴다. 역행 대응 중에는 손절을
+    # 일부러 멀리 걸거나 아예 걸지 않으므로, 손절 가격으로는 1R 을 알 수 없다.
+    if risk > 0:
+        moved = t["exit_price"] - entry
+        return round((-moved if t["side"] == "SHORT" else moved) / risk, 2)
 
     # 손절가 0 은 "손절가 없음"이다. 그걸 값으로 쓰면 1R 이 진입가 전체가 되어
     # 어떤 거래든 0.0x R 로 찍힌다 — 사람은 그걸 "본전"으로 읽는다.

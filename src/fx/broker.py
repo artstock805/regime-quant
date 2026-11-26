@@ -9,7 +9,8 @@ MT5 주문 계층 — 진입과 청산.
 
 **2. 손절은 진입과 같은 요청에 붙는다.** 나중에 따로 걸지 않는다. 프로그램이
 죽거나 네트워크가 끊겨도 브로커 쪽에 손절이 남아 있어야 포지션이 맨몸으로
-남지 않는다.
+남지 않는다. 손절 없이 들어가는 길은 하나뿐이다 — 부르는 쪽이 손절에 None 을
+명시했을 때(역행 대응의 최종 손절을 꺼 둔 설정).
 
 **3. 계산한 랏이 최소 랏보다 작으면 주문하지 않는다.** 올려서 넣으면 의도한
 1R 보다 큰 위험을 지게 된다 — 조용히 리스크가 커지는 쪽이 훨씬 나쁘다.
@@ -98,7 +99,7 @@ class Fill:
     side: str
     volume: float
     price: float
-    stop_loss: float
+    stop_loss: float | None        # None = 손절 없이 열었다
     take_profit: float | None
     tag: str
     retcode: int
@@ -229,7 +230,7 @@ def _filling(symbol: str) -> int:
 
 # ─── 진입 ────────────────────────────────────────────────────────
 
-def open_position(symbol: str, side: str, lots: float, stop_loss: float,
+def open_position(symbol: str, side: str, lots: float, stop_loss: float | None,
                   take_profit: float | None = None, *,
                   tag_value: str = "", deviation: int = 20,
                   allow_live: bool = False) -> Fill:
@@ -238,6 +239,10 @@ def open_position(symbol: str, side: str, lots: float, stop_loss: float,
 
     나중에 따로 거는 방식은 그 사이에 프로그램이 죽으면 포지션이 맨몸으로
     남는다. 브로커 쪽에 손절이 있으면 우리가 꺼져 있어도 지켜진다.
+
+    stop_loss 가 None 이면 **손절 없이** 들어간다. 실수로 빠뜨릴 수 없게 인자는
+    여전히 필수다 — 손절 없는 진입은 부르는 쪽이 None 을 명시해야만 나간다
+    (역행 대응에서 최종 손절을 꺼 둔 경우, src/fx/defense.py).
     """
     if side not in ("LONG", "SHORT"):
         raise ValueError(f"방향은 LONG/SHORT 여야 합니다: {side}")
@@ -259,12 +264,12 @@ def open_position(symbol: str, side: str, lots: float, stop_loss: float,
 
         if side == "LONG":
             kind, price = mt5.ORDER_TYPE_BUY, t.ask
-            if stop_loss >= price:
+            if stop_loss is not None and stop_loss >= price:
                 raise OrderRejected(
                     f"롱인데 손절({stop_loss})이 진입가({price}) 위에 있습니다")
         else:
             kind, price = mt5.ORDER_TYPE_SELL, t.bid
-            if stop_loss <= price:
+            if stop_loss is not None and stop_loss <= price:
                 raise OrderRejected(
                     f"숏인데 손절({stop_loss})이 진입가({price}) 아래에 있습니다")
 
@@ -274,13 +279,14 @@ def open_position(symbol: str, side: str, lots: float, stop_loss: float,
             "volume": float(lots),
             "type": kind,
             "price": float(price),
-            "sl": round(float(stop_loss), si.digits),
             "deviation": int(deviation),
             "magic": MAGIC,
             "comment": tag_value[:31],
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": _filling(symbol),
         }
+        if stop_loss is not None:
+            req["sl"] = round(float(stop_loss), si.digits)
         if take_profit:
             req["tp"] = round(float(take_profit), si.digits)
 
@@ -303,7 +309,8 @@ def open_position(symbol: str, side: str, lots: float, stop_loss: float,
         ticket = int(opened["ticket"])
 
     return Fill(ticket=ticket, symbol=symbol, side=side, volume=float(res.volume),
-                price=float(res.price), stop_loss=float(stop_loss),
+                price=float(res.price),
+                stop_loss=None if stop_loss is None else float(stop_loss),
                 take_profit=take_profit, tag=tag_value,
                 retcode=int(res.retcode), comment=str(res.comment))
 
@@ -385,9 +392,14 @@ def close_all(*, allow_live: bool = False, reason: str = "flatten") -> list[dict
 
 # ─── 손절 옮기기 ─────────────────────────────────────────────────
 
-def move_stop(ticket: int, stop_loss: float,
+def move_stop(ticket: int, stop_loss: float | None,
               take_profit: float | None = None) -> dict:
-    """손절을 옮긴다 (본전 이동 등). 포지션 자체는 그대로 둔다."""
+    """
+    손절·목표가를 옮긴다 (본전 이동, 묶음 목표가 당기기). 포지션은 그대로 둔다.
+
+    MT5 는 이 요청에서 손절과 목표가를 **함께** 다시 쓴다. 손절 없는 포지션의
+    목표가만 옮길 때는 stop_loss 에 None 을 준다 — 손절 0(없음)으로 보낸다.
+    """
     pos = positions().get(str(ticket))
     if pos is None:
         raise MT5Error(f"티켓 {ticket} 포지션이 없습니다")
@@ -399,7 +411,7 @@ def move_stop(ticket: int, stop_loss: float,
             "action": mt5.TRADE_ACTION_SLTP,
             "symbol": pos["symbol"],
             "position": int(ticket),
-            "sl": round(float(stop_loss), si.digits),
+            "sl": 0.0 if stop_loss is None else round(float(stop_loss), si.digits),
             "magic": MAGIC,
         }
         if take_profit is not None:

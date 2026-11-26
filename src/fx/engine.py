@@ -562,7 +562,8 @@ class FxTrader:
         rules = self.defense()
         # 역행 대응 중이면 한 종목에 여러 포지션이(양방 대응은 반대 방향으로도)
         # 있다. 묶음의 방향은 첫 진입의 방향이다.
-        basket = fx_defense.basket_of(held, rules)
+        basket = fx_defense.basket_of(
+            held, rules, symbol_info(pair.mt5).point if held and rules.enabled else 0.0)
         held_side = basket.side if basket else (held[0]["side"] if held else None)
 
         # 1) 청산이 먼저다. 자리를 비워야 다음 진입을 볼 수 있다.
@@ -614,9 +615,12 @@ class FxTrader:
         if rules.enabled:
             # 수량은 손절 거리 1배에 맞춘 그대로 두고, **손절만 멀리 건다** —
             # 추가 진입을 다 한 뒤 한 단계 더 간 자리다. 그 사이는 _defend 가 맡는다.
+            # 최종 손절을 꺼 두었으면(final_stop) 손절 없이 들어간다.
             sign = 1 if side == "LONG" else -1
-            stop = sig.close - sign * (rules.max_adds + 1) * sig.risk_per_unit
-            tag_value += fx_defense.BASE
+            stop = (sig.close - sign * (rules.max_adds + 1) * sig.risk_per_unit
+                    if rules.final_stop else None)
+            # 단계 간격을 태그에 적는다. 손절이 없어도, 재시작해도 읽을 수 있게.
+            tag_value += fx_defense.base_suffix(sig.risk_per_unit, si.point)
         try:
             fill = broker.open_position(
                 pair.mt5, side, lots, stop, sig.target_price,
@@ -636,6 +640,9 @@ class FxTrader:
         row = {**fill.as_dict(), "canonical": pair.canonical,
                "tradingview": pair.tradingview, "score": sig.score,
                "regime": sig.regime,
+               # 1R 의 가격(손절 거리 1배). 거래 내역이 R 을 이것으로 계산한다 —
+               # 손절 가격으로 계산하면 손절을 멀리 걸거나 안 건 거래의 R 이 틀린다.
+               "risk_per_unit": sig.risk_per_unit,
                # 이 진입을 만든 전략들. 진입하는 순간에 남겨야 한다 — 가중치는
                # 매 바퀴 다시 계산되므로 나중에는 그때의 투표를 되살릴 수 없다.
                "strategies": entry_votes(sig)}
@@ -722,6 +729,7 @@ class FxTrader:
         }
         row = {**fill.as_dict(), "canonical": pair.canonical,
                "tradingview": pair.tradingview, "score": sig.score, "regime": sig.regime,
+               "risk_per_unit": basket.step,
                "strategies": [], "defense": kind, "level": level,
                "basket": str(basket.base.get("comment", ""))}
         self.state.opened.append(row)
