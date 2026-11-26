@@ -57,6 +57,14 @@ class Rules:
     # 최종 손절(강제 손절)을 거는가. 끄면 **손절 없이** 진입한다 — 마지막 추가
     # 뒤에도 묶음은 목표가에 닿거나 신호가 닫을 때까지 열려 있다.
     final_stop: bool = True
+    # 계좌 전체의 손실 한도. 평가 자산이 입금액의 이 비율만큼 줄면 **앱이 연 포지션을
+    # 전부 닫고 엔진을 멈춘다** (예: 0.20 → 입금 10,000 이면 8,000 아래에서).
+    # 최종 손절을 꺼 두었을 때 손실에 끝을 두는 유일한 장치다. 0 이면 쓰지 않는다.
+    seed_stop: float = 0.0
+    # 추가 진입이 이 횟수에 이른 묶음은 **본전(평균 단가)에서 청산**한다. 그 전까지는
+    # 처음 노렸던 수익을 목표로 한다. 깊이 물린 묶음은 수익을 노리지 않고 빠져나온다.
+    # 0 이면 쓰지 않는다.
+    breakeven_after: int = 0
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -71,7 +79,9 @@ def rules(cfg) -> Rules:
                  max_adds=min(max(int(get("max_adds", 3)), 0), 9),
                  multiplier=max(float(get("multiplier", 2.0)), 1.0),
                  shock_mult=float(get("shock_mult", 2.0)),
-                 final_stop=bool(get("final_stop", True)))
+                 final_stop=bool(get("final_stop", True)),
+                 seed_stop=min(max(float(get("seed_stop", 0.0)), 0.0), 1.0),
+                 breakeven_after=max(int(get("breakeven_after", 0)), 0))
 
 
 def base_suffix(step: float, point: float) -> str:
@@ -196,10 +206,16 @@ class Basket:
 
         첫 진입은 손절 거리의 reward_ratio 배를 노렸다. 묶음이 커진 뒤에도 같은
         돈을 벌면 되므로, 평균 단가에서 그 거리를 (첫 수량 / 전체 수량)만큼만 간다.
+
+        추가가 breakeven_after 회에 이르면 수익을 노리지 않는다 — **평균 단가에서
+        닫는다.** 진입가에는 이미 스프레드가 들어 있으므로 평균 단가가 곧 본전이다.
         """
         fills = [(float(p["volume"]), float(p["entry_price"])) for p in self.legs] + [added]
         total = sum(v for v, _ in fills)
         average = sum(v * price for v, price in fills) / total
+        after = self.rules.breakeven_after
+        if after and self.level + 1 >= after:
+            return average
         return average + self.sign * reward_ratio * self.step * float(self.base["volume"]) / total
 
 

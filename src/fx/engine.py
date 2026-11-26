@@ -29,6 +29,7 @@ FX 자동매매 루프 — 신호를 보고 MT5 로 진입·청산한다.
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -48,7 +49,7 @@ from . import broker
 from . import defense as fx_defense
 from . import keepawake
 from . import watchlist as fx_watchlist
-from .mt5 import MT5Error, bars, account, positions, symbol_info
+from .mt5 import MT5Error, bars, account, cash_flows, positions, symbol_info
 from .symbols import Pair
 
 # 검증 결과. 화면과 장부가 같은 문장을 쓰도록 한 곳에 둔다.
@@ -80,6 +81,9 @@ _BARS_PER_DAY = {"1m": 1440, "5m": 288, "15m": 96, "30m": 48,
 # 그 셋을 다 맞춰야 하고 하나만 틀려도 같은 봉을 두 번 보거나 건너뛴다.
 # **새 봉이 실제로 나타났는지 보는 쪽**이 그 전부를 원천 회피한다.
 POLL_SECONDS = 30.0
+
+# 입금액을 다시 읽는 주기(초). 계좌 손실 한도(_seed_stop)의 기준값이다.
+SEED_REFRESH_SECONDS = 600.0
 
 
 @dataclass
@@ -182,6 +186,8 @@ class FxTrader:
     group: Group = MAIN
     # 루프가 절전 방지를 쥐고 있는가 (루프 스레드가 세우고 내린다)
     _awake: bool = False
+    # 입금액(입금 − 출금)과 읽은 시각. 계좌의 것이라 군이 함께 쓴다.
+    _seed_cache: tuple[float, float] | None = None
 
     def __init__(self, cfg: Config | None = None,
                  journal: Journal | None = None,
@@ -434,6 +440,8 @@ class FxTrader:
         """
         while not self._stop.is_set():
             try:
+                if self._seed_stop():       # 계좌 손실 한도 — 봉 마감을 기다리지 않는다
+                    break
                 newest = self._newest_bar()
                 self.state.checks += 1
                 if newest and newest != self.state.last_bar:
@@ -452,6 +460,59 @@ class FxTrader:
             self.state.next_check = datetime.now(timezone.utc).isoformat()
             if self._stop.wait(POLL_SECONDS):
                 break
+
+    # ─── 계좌 손실 한도 ──────────────────────────────────────────
+
+    def _seed(self) -> float:
+        """
+        입금액(입금 − 출금). 손실 한도의 기준이다. 모르면 0.
+
+        거래 내역 전체를 훑어야 나오는 값이라 10분에 한 번만 다시 읽는다 — 그 사이
+        입금액이 바뀌는 일은 없다시피 하고, 30초마다 훑으면 MT5 가 느려진다.
+        """
+        now = time.monotonic()
+        cached = FxTrader._seed_cache
+        if cached is not None and now - cached[1] < SEED_REFRESH_SECONDS:
+            return cached[0]
+        value = float(cash_flows().get("net_funding") or 0.0)
+        FxTrader._seed_cache = (value, now)
+        return value
+
+    def _seed_stop(self) -> bool:
+        """
+        평가 자산이 입금액의 (1 − seed_stop) 아래로 내려갔으면 **앱이 연 포지션을 전부
+        닫고 엔진을 멈춘다.** 그렇게 했으면 True.
+
+        최종 손절을 꺼 두면 묶음 하나의 손실에 끝이 없다. 이 한도가 그 끝이다.
+        평가 자산(미실현 손익 포함)으로 잰다 — 잔고는 닫기 전까지 그대로라서 열린
+        포지션이 계좌를 깎고 있어도 알 수 없다. 사람이 손으로 연 포지션의 손익도
+        평가 자산에 들어가지만, 닫는 것은 앱이 연 것뿐이다.
+
+        킬 스위치를 **먼저** 켠다. 닫는 도중에 다른 군이 새로 들어가면 안 된다.
+        풀려면 사람이 화면에서 킬을 해제해야 한다.
+        """
+        limit = self.defense().seed_stop
+        if limit <= 0 or self.guard.kill_switch:
+            return False
+        seed = self._seed()
+        if seed <= 0:
+            return False
+        equity, floor = account().equity, seed * (1.0 - limit)
+        if equity > floor:
+            return False
+
+        reason = (f"평가 자산 {equity:.2f} 이 입금액 {seed:.2f} 의 "
+                  f"-{limit:.0%} 선({floor:.2f}) 아래로 내려갔습니다")
+        self.guard.engage_kill(reason)
+        try:
+            # **닫는 것이 먼저다.** 기록이 실패해도 포지션은 닫혀 있어야 한다.
+            self.flatten("계좌 손실 한도")
+        finally:
+            self.journal.write("engine", event="seed_stop", equity=equity, seed=seed,
+                               floor=floor, reason=reason)
+            for other in {id(t): t for t in (self, *traders())}.values():
+                other.kill(reason)
+        return True
 
     # ─── 한 회 ───────────────────────────────────────────────────
 
@@ -779,7 +840,16 @@ class FxTrader:
             balance, acct_d = acct.balance, acct.as_dict()
         except MT5Error as exc:
             balance, acct_d = 0.0, {"error": str(exc)}
+        rules = self.defense()
+        try:
+            seed = self._seed() if rules.seed_stop > 0 else 0.0
+        except MT5Error:
+            seed = 0.0
         return {
+            # 계좌 손실 한도. floor 아래로 평가 자산이 내려가면 전부 닫고 멈춘다.
+            # 입금액을 모르면(seed 0) 한도가 듣지 않는다 — 화면이 그것을 알려야 한다.
+            "seed_stop": {"limit": rules.seed_stop, "seed": seed,
+                          "floor": round(seed * (1.0 - rules.seed_stop), 2) if seed > 0 else None},
             "group": self.group.name,
             "group_label": self.group.label,
             "running": self.state.running,

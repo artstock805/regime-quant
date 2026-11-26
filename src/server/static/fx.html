@@ -968,8 +968,16 @@ function renderEngine(st) {
     <div class="enginerow"><span class="k">역행 대응</span>
       <b title="손절 거리 1배 역행할 때마다 추가 진입합니다. 급변동으로 밀리면 추가하지 않고 같은 수량의 반대 포지션으로 묶습니다. 마지막 추가 뒤 한 단계 더 가면 묶음 전체가 손절됩니다.">${
         st.defense?.enabled
-          ? `마팅게일 ${st.defense.max_adds}회 ×${st.defense.multiplier} · 급변동 시 양방`
+          ? `마팅게일 ${st.defense.max_adds}회 ×${st.defense.multiplier} · 급변동 시 양방${
+              st.defense.breakeven_after ? ` · ${st.defense.breakeven_after}회 추가부터 본전 청산` : ""}`
           : "꺼짐"}</b></div>
+    ${st.seed_stop?.limit > 0 ? `<div class="enginerow"><span class="k">계좌 손실 한도</span>
+      <b title="평가 자산(미실현 손익 포함)이 이 금액 아래로 내려가면 앱이 연 포지션을 전부 닫고 킬 스위치를 켭니다. 30초마다 확인합니다. 입금액은 MT5 의 입출금 내역에서 읽습니다."
+         style="${st.seed_stop.floor == null ? "color:var(--down)" : ""}">${
+        st.seed_stop.floor == null
+          ? "입금액을 읽지 못해 꺼져 있습니다"
+          : `평가 자산 ${Number(st.seed_stop.floor).toLocaleString()} 아래 (입금 ${
+              Number(st.seed_stop.seed).toLocaleString()} 의 −${Math.round(st.seed_stop.limit * 100)}%)`}</b></div>` : ""}
     ${st.defense?.enabled ? `<div class="enginerow"><span class="k">강제 손절</span>
       <b title="켜면 마지막 추가 진입 뒤 한 단계 더 역행한 자리에 손절을 겁니다. 끄면 손절 없이 진입하고, 묶음은 목표가에 닿거나 신호가 닫을 때까지 열려 있습니다. config.yaml 의 fx.defense.final_stop 으로 바꿉니다."
          style="${st.defense.final_stop ? "" : "color:var(--down)"}">${

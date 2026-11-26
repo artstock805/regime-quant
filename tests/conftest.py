@@ -48,6 +48,11 @@ def _stop_engine_loops(monkeypatch):
     # 엔진 루프는 도는 동안 PC 의 절전을 막는다. 테스트가 이 PC 의 전원 상태에
     # 손대지 않게 한다 — 요청이 됐다고만 답한다.
     monkeypatch.setattr(keepawake, "_set", lambda flags: True)
+    # 엔진 루프는 계좌 손실 한도를 보려고 입출금 내역을 읽는다. 테스트는 실제 계좌의
+    # 내역에 닿지 않는다 — 입금액을 모르는 것으로 두면 한도가 듣지 않는다. 한도를
+    # 시험하는 테스트는 자기가 갈아 끼운다.
+    monkeypatch.setattr(engine, "cash_flows", lambda *a, **k: {"net_funding": 0.0})
+    monkeypatch.setattr(engine.FxTrader, "_seed_cache", None)
 
     started: list = []
     spawn = engine.FxTrader._spawn

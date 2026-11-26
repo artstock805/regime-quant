@@ -47,6 +47,9 @@ class FakeEngine(eng.FxTrader):
     def _newest_bar(self):
         return self.bar
 
+    def _seed_stop(self):
+        return False                 # 계좌 손실 한도는 설정·계좌가 필요하다. 여기는 루프만 본다.
+
     def run_once(self):
         if self.explode:
             raise RuntimeError("한 바퀴 실패")

@@ -83,7 +83,14 @@ def nostop(tmp_path, monkeypatch):
     return make_desk(tmp_path, monkeypatch, final_stop=False)
 
 
-def make_desk(tmp_path, monkeypatch, *, final_stop: bool):
+@pytest.fixture
+def live_rules(tmp_path, monkeypatch):
+    """지금 쓰는 설정 — 손절 없이, 2회 추가부터 본전 청산, 계좌 손실 한도 20%."""
+    return make_desk(tmp_path, monkeypatch, final_stop=False,
+                     breakeven_after=2, seed_stop=0.20)
+
+
+def make_desk(tmp_path, monkeypatch, *, final_stop: bool, **more):
     book = Book()
     monkeypatch.setattr(eng, "account", lambda: DEMO)
     monkeypatch.setattr(eng, "symbol_info", lambda name: INFO)
@@ -100,7 +107,7 @@ def make_desk(tmp_path, monkeypatch, *, final_stop: bool):
     raw["fx"] = {**raw["fx"], "interval": "1h",
                  "watchlist_file": str(tmp_path / "wl.json"),
                  "defense": {"enabled": True, "max_adds": 3, "multiplier": 2.0,
-                             "shock_mult": 2.0, "final_stop": final_stop}}
+                             "shock_mult": 2.0, "final_stop": final_stop, **more}}
     trader = eng.FxTrader(cfg=Config(raw), journal=Journal(tmp_path / "j.jsonl"))
     monkeypatch.setattr(trader, "watchlist", lambda: [PAIR])
     trader.state.running = True
@@ -394,7 +401,147 @@ def test_the_status_shows_the_rules(desk):
     trader, _, _ = desk
     assert trader.status()["defense"] == {"enabled": True, "max_adds": 3,
                                           "multiplier": 2.0, "shock_mult": 2.0,
-                                          "final_stop": True}
+                                          "final_stop": True, "seed_stop": 0.0,
+                                          "breakeven_after": 0}
+
+
+# ─── 2회 이상 추가한 묶음은 본전에서 닫는다 ──────────────────────
+
+def average(book) -> float:
+    legs = list(book.live.values())
+    return sum(p["volume"] * p["entry_price"] for p in legs) / sum(p["volume"] for p in legs)
+
+
+def test_the_first_add_still_aims_for_the_original_profit(live_rules):
+    trader, book, drive = live_rules
+    enter(drive)
+    drive(1.0950)
+    reward = float(trader.cfg.require("risk.reward_ratio"))
+    expected = average(book) + reward * STEP * 0.10 / 0.30
+    assert [p["take_profit"] for p in book.live.values()] == pytest.approx([expected] * 2)
+    assert expected > average(book), "한 번 추가까지는 수익을 노린다"
+
+
+def test_from_the_second_add_the_basket_closes_at_break_even(live_rules):
+    _, book, drive = live_rules
+    enter(drive)
+    drive(1.0950)
+    drive(1.0900)
+    assert set(book.by_tag()) == {"m0", "m1", "m2"}
+    assert [p["take_profit"] for p in book.live.values()] == pytest.approx([average(book)] * 3), \
+        "깊이 물린 묶음은 평균 단가에서 빠져나온다"
+
+    drive(1.0850)                                       # 3회째에도 본전이다
+    assert [p["take_profit"] for p in book.live.values()] == pytest.approx([average(book)] * 4)
+    assert all(p["stop_loss"] is None for p in book.live.values())
+
+
+def test_break_even_is_off_unless_configured(nostop):
+    trader, book, drive = nostop
+    enter(drive)
+    for price in (1.0950, 1.0900):
+        drive(price)
+    assert all(p["take_profit"] > average(book) for p in book.live.values())
+
+
+# ─── 계좌 손실 한도 ──────────────────────────────────────────────
+
+def with_account(monkeypatch, book, *, equity: float, seed: float = 10_000.0):
+    """입금액과 평가 자산을 정하고, 전량 청산이 가짜 계좌를 비우게 한다."""
+    from dataclasses import replace
+
+    def close_all(*, allow_live=False, reason=""):
+        out = [book.close(int(ticket), reason=reason) for ticket in list(book.live)]
+        return out
+
+    monkeypatch.setattr(eng, "account", lambda: replace(DEMO, equity=equity))
+    monkeypatch.setattr(eng, "cash_flows", lambda *a, **k: {"net_funding": seed})
+    monkeypatch.setattr(eng.FxTrader, "_seed_cache", None)
+    monkeypatch.setattr(eng.broker, "close_all", close_all)
+
+
+def test_nothing_happens_while_equity_is_above_the_floor(live_rules, monkeypatch):
+    trader, book, drive = live_rules
+    enter(drive)
+    with_account(monkeypatch, book, equity=8_000.01)
+    assert trader._seed_stop() is False
+    assert len(book.live) == 1 and trader.guard.kill_switch is False
+
+
+def test_twenty_percent_down_closes_everything_and_stops_the_engine(live_rules, monkeypatch):
+    trader, book, drive = live_rules
+    enter(drive)
+    drive(1.0950)
+    assert len(book.live) == 2
+    with_account(monkeypatch, book, equity=8_000.00)
+
+    assert trader._seed_stop() is True
+    assert book.live == {}, "앱이 연 포지션을 전부 닫는다"
+    assert trader.guard.kill_switch is True and trader.state.running is False
+    (row,) = [r for r in trader.journal.tail(20, kinds=["engine"])
+              if r.get("event") == "seed_stop"]
+    assert row["seed"] == 10_000.0 and row["floor"] == pytest.approx(8_000.0)
+    assert len(trader.journal.tail(20, kinds=["close"])) == 2, "닫은 것도 장부에 남는다"
+
+    trader.state.running = True                         # 사람이 킬을 풀기 전에는 못 들어간다
+    drive(1.1000, Signal("롱진입", 1, bar_time="2025-06-02T09:00:00+00:00"))
+    assert book.live == {}
+    assert trader._seed_stop() is False, "이미 멈췄으면 다시 닫으려 들지 않는다"
+
+
+def test_the_floor_follows_the_deposit_not_the_balance(live_rules, monkeypatch):
+    """입금액이 5만이면 4만 아래에서 닫는다. 지금 잔고가 얼마든 기준은 넣은 돈이다."""
+    trader, book, drive = live_rules
+    enter(drive)
+    with_account(monkeypatch, book, equity=40_500.0, seed=50_000.0)
+    assert trader._seed_stop() is False
+    with_account(monkeypatch, book, equity=39_999.0, seed=50_000.0)
+    assert trader._seed_stop() is True
+
+
+def test_an_unknown_deposit_leaves_the_limit_off_and_the_status_says_so(live_rules, monkeypatch):
+    trader, book, drive = live_rules
+    enter(drive)
+    with_account(monkeypatch, book, equity=100.0, seed=0.0)
+    assert trader._seed_stop() is False and len(book.live) == 1
+    assert trader.status()["seed_stop"] == {"limit": 0.20, "seed": 0.0, "floor": None}
+
+
+def test_the_status_shows_the_floor(live_rules, monkeypatch):
+    trader, book, _ = live_rules
+    with_account(monkeypatch, book, equity=10_000.0)
+    assert trader.status()["seed_stop"] == {"limit": 0.20, "seed": 10_000.0, "floor": 8_000.0}
+
+
+def test_the_limit_is_off_unless_configured(nostop, monkeypatch):
+    trader, book, drive = nostop
+    enter(drive)
+    with_account(monkeypatch, book, equity=1.0)
+    assert trader._seed_stop() is False and len(book.live) == 1
+
+
+def test_the_deposit_is_read_once_in_a_while_not_every_poll(live_rules, monkeypatch):
+    trader, book, _ = live_rules
+    with_account(monkeypatch, book, equity=10_000.0)
+    calls = []
+    monkeypatch.setattr(eng, "cash_flows",
+                        lambda *a, **k: calls.append(1) or {"net_funding": 10_000.0})
+    for _ in range(20):
+        trader._seed_stop()
+    assert len(calls) == 1, "거래 내역 전체를 30초마다 훑지 않는다"
+
+
+def test_the_engine_loop_checks_the_limit_between_bars(live_rules, monkeypatch):
+    """봉 마감을 기다리지 않는다 — 루프가 돌 때마다 본다."""
+    trader, book, drive = live_rules
+    enter(drive)
+    with_account(monkeypatch, book, equity=7_500.0)
+    monkeypatch.setattr(eng, "POLL_SECONDS", 0.05)
+    monkeypatch.setattr(trader, "_newest_bar", lambda: None)
+    trader._spawn()
+    trader._thread.join(timeout=5)
+    assert not trader._thread.is_alive(), "한도에 닿았으면 루프가 선다"
+    assert book.live == {} and trader.guard.kill_switch is True
 
 
 # ─── 최종 손절은 선택 사항이다 ───────────────────────────────────
