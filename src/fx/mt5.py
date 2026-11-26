@@ -16,6 +16,7 @@ MT5 는 신호 계산과 주문에만 쓴다. 다만 두 시세는 브로커가 
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -35,6 +36,12 @@ TIMEFRAMES = {
 
 _lock = threading.RLock()
 _initialised = False
+# 붙어 있다고 믿고 있어도 이 주기(초)로 터미널이 실제로 응답하는지 확인한다.
+# 매 호출마다 확인하면 봉 수천 개를 받는 바퀴가 느려지고, 아예 안 하면 죽은
+# 연결을 영영 모른다.
+_HEALTH_EVERY = 10.0
+_checked_at = float("-inf")
+logger = logging.getLogger(__name__)
 
 # ─── 브로커 서버 시간 ────────────────────────────────────────────
 #
@@ -160,11 +167,27 @@ def initialise() -> bool:
     MT5 는 **터미널이 실행 중이고 계정에 로그인돼 있어야** 한다. 그렇지 않으면
     여기서 바로 알려 준다 — 조회가 조용히 빈 값을 돌려주는 것보다 낫다.
     """
-    global _initialised
+    global _initialised, _checked_at
     with _lock:
-        if _initialised:
-            return True
         mt5 = _mt5()
+        now = time.monotonic()
+        if _initialised:
+            if now - _checked_at < _HEALTH_EVERY:
+                return True
+            if mt5.terminal_info() is not None:
+                _checked_at = now
+                return True
+            # **붙어 있다고 믿었는데 끊겨 있다.** PC 가 절전에 들어갔다 나오거나
+            # 터미널이 다시 켜지면 연결이 죽는데, 죽은 연결은 예외를 던지지 않고
+            # 모든 호출에 None 을 돌려준다. 실제로 있었던 일이다: 플래그만 보고
+            # 다시 붙지 않아서, 엔진이 며칠 동안 30초마다 같은 오류만 찍었다.
+            # 닫고 처음부터 다시 붙는다.
+            _initialised = False
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
+            logger.warning("MT5 연결이 끊겨 있어 다시 붙습니다")
         if not mt5.initialize():
             code, msg = mt5.last_error()
             raise MT5Error(
@@ -172,7 +195,19 @@ def initialise() -> bool:
                 "  · MetaTrader 5 를 실행하고 계정에 로그인하세요\n"
                 "  · 도구 > 옵션 > Expert Advisors 에서 자동매매 허용을 켜세요")
         _initialised = True
+        _checked_at = now
         return True
+
+
+def _suspect() -> None:
+    """
+    연결이 수상하다 — 다음 호출에서 바로 다시 확인하게 한다.
+
+    계정 정보나 종목 목록이 통째로 None 이면 연결이 죽었을 가능성이 높다.
+    확인 주기를 기다리지 않고 다음 호출이 곧바로 살펴보고, 죽었으면 다시 붙는다.
+    """
+    global _checked_at
+    _checked_at = float("-inf")
 
 
 def shutdown() -> None:
@@ -207,6 +242,7 @@ def account() -> Account:
         a = mt5.account_info()
         t = mt5.terminal_info()
         if a is None:
+            _suspect()
             raise MT5Error("계정 정보를 읽지 못했습니다 — 로그인 상태를 확인하세요")
         return Account(
             login=a.login, server=a.server, currency=a.currency,
@@ -292,8 +328,13 @@ def available_symbols(only_forex: bool = True) -> list[str]:
     """
     with _lock:
         initialise()
+        rows = _mt5().symbols_get()
+        if rows is None:
+            # 종목이 하나도 없는 브로커는 없다. None 은 연결이 죽었다는 뜻이다.
+            _suspect()
+            raise MT5Error("종목 목록을 읽지 못했습니다 — MT5 연결을 다시 확인합니다")
         out = []
-        for s in _mt5().symbols_get():
+        for s in rows:
             if only_forex and not s.path.lower().startswith("forex"):
                 continue
             out.append(s.name)
