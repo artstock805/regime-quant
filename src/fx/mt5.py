@@ -231,6 +231,27 @@ class SymbolInfo:
     contract_size: float
     bid: float
     ask: float
+    # 1틱의 크기와, 1랏이 1틱 움직일 때의 손익(**계좌 통화**). 호가 통화를 계좌
+    # 통화로 바꾸는 데 쓴다. 0 이면 모른다는 뜻이다.
+    tick_size: float = 0.0
+    tick_value: float = 0.0
+
+    def notional(self, lots: float, price: float) -> float:
+        """
+        이 수량의 명목가를 **계좌 통화**로.
+
+        `랏 × 계약 크기 × 가격` 은 호가 통화 단위다. 달러 계좌에서 그대로 쓰면
+        USD/JPY 0.1랏(1만 달러어치)이 159만으로 나온다 — 실제로 그 값이 명목가
+        상한에 걸려 엔 통화쌍이 한 번도 진입하지 못했다. CAD·NZD·CHF 호가도 정도만
+        다를 뿐 같은 식으로 틀린다.
+
+        틱 가치가 그 환산을 담고 있다: 가격 전체는 (가격 / 틱 크기)틱이고, 1틱의
+        계좌 통화 가치가 tick_value 다. 브로커가 쓰는 환율 그대로다.
+        틱 정보가 없으면 호가 통화가 곧 계좌 통화라고 본다(예전 계산).
+        """
+        if self.tick_size > 0 and self.tick_value > 0:
+            return lots * (price / self.tick_size) * self.tick_value
+        return lots * self.contract_size * price
 
     @property
     def spread_pips(self) -> float:
@@ -259,6 +280,8 @@ def symbol_info(name: str) -> SymbolInfo:
             volume_min=s.volume_min, volume_max=s.volume_max,
             volume_step=s.volume_step, contract_size=s.trade_contract_size,
             bid=s.bid, ask=s.ask,
+            tick_size=float(getattr(s, "trade_tick_size", 0.0) or 0.0),
+            tick_value=float(getattr(s, "trade_tick_value", 0.0) or 0.0),
         )
 
 

@@ -423,3 +423,31 @@ def test_the_threshold_comes_from_the_fx_config(trader, monkeypatch):
                         lambda k, d=None: 0.5 if k == "fx.entry_threshold"
                         else (True if k == "fx.calibrate_strength" else d))
     assert trader.weight_params().entry_threshold == 0.5
+
+
+# ─── 명목가는 계좌 통화로 잰다 ───────────────────────────────────
+
+# USD/JPY 159엔. 1랏이 1틱(0.001엔) 움직이면 100엔 = 약 0.63달러다.
+YEN = SymbolInfo(name="USDJPY", digits=3, point=0.001, spread_points=10,
+                 spread_price=0.01, volume_min=0.01, volume_max=50.0,
+                 volume_step=0.01, contract_size=100_000.0, bid=159.00, ask=159.02,
+                 tick_size=0.001, tick_value=100_000 * 0.001 / 159.0)
+
+
+def test_notional_is_measured_in_the_account_currency():
+    """0.1랏 USD/JPY 는 1만 달러어치다. 159만이 아니다."""
+    assert YEN.notional(0.1, 159.0) == pytest.approx(10_000.0)
+    # 틱 정보가 없으면 호가 통화가 계좌 통화라고 본다 (EUR/USD 는 그게 맞다)
+    assert INFO.notional(0.1, 1.1) == pytest.approx(11_000.0)
+
+
+def test_a_yen_pair_is_not_blocked_by_the_notional_cap(trader, monkeypatch):
+    """
+    **실제로 있었던 일이다.** 명목가를 엔 그대로 달러 한도와 비교해서 AUD/JPY
+    진입이 "명목가 상한 초과 (2,245,593 > 300,060)"로 거부됐다. 엔 통화쌍은 한 번도
+    진입하지 못했다.
+    """
+    monkeypatch.setattr(eng, "symbol_info", lambda name: YEN)
+    trader.start()
+    drive(trader, Signal(close=159.0, stop=158.0, target=160.5), monkeypatch)
+    assert len(trader.sent) == 1, trader.journal.tail(3, kinds=["blocked"])

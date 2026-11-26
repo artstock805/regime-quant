@@ -585,7 +585,7 @@ class FxTrader:
             return
 
         si = symbol_info(pair.mt5)
-        notional = lots * si.contract_size * sig.close
+        notional = si.notional(lots, sig.close)      # 계좌 통화로 — 한도가 그 단위다
         decision = self.guard.check_entry(
             balance=acct.balance, open_positions=self._baskets(),
             notional=notional, symbol=pair.canonical)
@@ -684,7 +684,7 @@ class FxTrader:
         # 이 종목은 이미 한 자리를 쓰고 있다 — 자기 자신은 한도에서 뺀다.
         decision = self.guard.check_entry(
             balance=acct.balance, open_positions=self._baskets() - 1,
-            notional=lots * si.contract_size * sig.close, symbol=pair.canonical)
+            notional=si.notional(lots, sig.close), symbol=pair.canonical)
         if not decision:
             self._blocked(pair, f"역행 대응 보류 — {decision.reason}")
             return None
