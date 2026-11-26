@@ -393,13 +393,15 @@ def main(argv: list[str] | None = None) -> int:
         result["spec_created_at"] = record["created_at"]
         if not store.set_validation(name, result, cfg, timeframe=chosen):
             raise ValidationError("검증하는 동안 전략이 바뀌어 결과를 버렸습니다")
-        # 손실로 나왔으면 보관함으로 옮긴다. 목록에는 켤 수 있는 후보만 남긴다.
-        lost = isinstance(result.get("net_r"), (int, float)) and result["net_r"] < 0
-        if lost:
+        # **통과하지 못했으면 보관함으로 옮긴다.** 손실이든, 거래가 너무 적어 판정이
+        # 안 났든 켤 수 없기는 마찬가지다. 목록에는 켤 수 있는 후보만 남긴다.
+        net = result.get("net_r")
+        passed = isinstance(net, (int, float)) and not isinstance(net, bool) and net >= 0
+        if not passed:
             store.archive(name, cfg)
         write_status(cfg, name=name, state="done", done=result["pairs"],
-                     total=result["pairs"], symbol="", archived=lost,
-                     net_r=result.get("net_r"))
+                     total=result["pairs"], symbol="", archived=not passed,
+                     net_r=net, trades=result.get("trades"))
         return 0
     except Exception as exc:
         write_status(cfg, name=name, state="failed", error=f"{type(exc).__name__}: {exc}"

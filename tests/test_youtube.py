@@ -762,11 +762,12 @@ def test_the_child_process_entry_saves_the_result(vcfg, monkeypatch):
     assert validation.main(["sma_trend"]) == 0
     done = validation.read_status(vcfg)
     assert done["state"] == "done"
-    # 손실로 나왔으면 보관함으로 옮겨져 있다 — 어느 쪽이든 결과는 전략과 함께 있다
+    # 통과하지 못했으면 보관함으로 옮겨져 있다 — 어느 쪽이든 결과는 전략과 함께 있다
     where = store.load_archived(vcfg) if done["archived"] else store.load_all(vcfg)
     saved = where[0]["validation"]
     assert saved["pairs"] == 1 and saved["trades"] > 0
-    assert done["archived"] is (saved["net_r"] < 0)
+    passed = saved["net_r"] is not None and saved["net_r"] >= 0
+    assert done["archived"] is (not passed)
     assert len(store.load_all(vcfg)) + len(store.load_archived(vcfg)) == 1
 
     assert validation.main(["nope"]) == 1
@@ -828,6 +829,41 @@ def test_the_bar_found_by_validation_becomes_the_strategys_timeframe(vcfg, monke
     assert saved["spec"]["timeframe"] == "30m"
     assert saved["validation"]["timeframe_chosen"] == "30m"
     assert strategy_group(saved["spec"]["timeframe"], "1h") == "short"
+
+
+@pytest.mark.parametrize("trades, net_r, kept", [
+    (500, 0.04, True),       # 통과 — 목록에 남아 켤 수 있다
+    (500, -0.04, False),     # 손실
+    (0, None, False),        # 거래가 없어 판정 불가
+    (12, None, False),       # 거래가 너무 적어 판정 불가
+])
+def test_only_a_strategy_that_passed_stays_on_the_list(vcfg, monkeypatch, trades, net_r, kept):
+    """통과하지 못했으면 이유가 무엇이든 켤 수 없다. 목록에는 켤 수 있는 것만 둔다."""
+    store.save(raw_spec(), URL, cfg=vcfg)
+    monkeypatch.setattr(validation, "load_config", lambda: vcfg)
+    monkeypatch.setattr(validation, "run", lambda spec_, cfg, progress=None: {
+        "trades": trades, "net_r": net_r, "interval": "1h", "pairs": 28})
+
+    assert validation.main(["sma_trend"]) == 0
+    assert [r["spec"]["strategy_name"] for r in store.load_all(vcfg)] == (["sma_trend"] if kept else [])
+    assert len(store.load_archived(vcfg)) == (0 if kept else 1)
+    done = validation.read_status(vcfg)
+    assert done["archived"] is (not kept) and done["trades"] == trades
+
+
+def test_a_strategy_that_cannot_be_validated_is_archived_on_arrival(client, cfg, monkeypatch):
+    """1분봉처럼 검증할 길이 없는 전략. 통과할 수 없으니 목록에 둘 이유가 없다."""
+    from src.server import youtube_api
+
+    def cannot(name, cfg_):
+        raise validation.ValidationError("1m봉 전략은 검증할 수 없습니다")
+
+    monkeypatch.setattr(youtube_api.validation, "enqueue", cannot)
+    made = client.post("/api/youtube/extract", json={"url": URL}).json()
+    assert made["archived"] is True and made["validation_queued"] is False
+    listed = client.get("/api/youtube/strategies").json()
+    assert listed["strategies"] == []
+    assert [a["strategy_name"] for a in listed["archived"]] == ["sma_trend"]
 
 
 def test_only_one_validation_runs_at_a_time(vcfg, monkeypatch):

@@ -91,7 +91,8 @@ def youtube_strategies() -> dict[str, Any]:
         "validation_job": validation.status(cfg),
         # 앞의 검증이 끝나기를 기다리는 전략 이름 (대입 직후 자동 검증의 대기 줄).
         "validation_queue": validation.queued(),
-        # 손실로 검증돼 보관함으로 옮긴 전략. 목록에는 넣지 않고 따로 준다 —
+        # 검증을 통과하지 못해(손실·판정 불가·검증 불가) 보관함으로 옮긴 전략.
+        # 목록에는 넣지 않고 따로 준다 —
         # 화면의 보관함이 규칙·검증 성적·영상을 보여 준다.
         "archived": [_view(r, interval) for r in store.load_archived(cfg)],
     }
@@ -126,13 +127,20 @@ def youtube_extract(req: ExtractRequest) -> dict[str, Any]:
     except Exception as exc:                 # 네트워크·LLM API 오류
         raise HTTPException(502, f"{type(exc).__name__}: {exc}") from exc
     # 대입하면 바로 과거 검증을 건다. 이미 도는 검증이 있으면 줄을 선다.
-    # 검증할 수 없는 전략(1분봉 등)은 그냥 저장만 한다 — 목록이 이유를 말해 준다.
+    # 검증할 수 없는 전략(1분봉 등)은 통과할 길이 없으므로 바로 보관함으로 옮긴다 —
+    # 목록에는 켤 수 있는 후보와 검증을 기다리는 것만 둔다.
+    name = record["spec"]["strategy_name"]
+    queued = archived = False
     try:
-        validation.enqueue(record["spec"]["strategy_name"], cfg)
+        validation.enqueue(name, cfg)
         queued = True
-    except (validation.ValidationError, store.StoreError):
-        queued = False
-    return {**_view(record, str(cfg.get("fx.interval", "1h"))), "validation_queued": queued}
+    except validation.ValidationError:
+        store.archive(name, cfg)
+        archived = True
+    except store.StoreError:
+        pass
+    return {**_view(record, str(cfg.get("fx.interval", "1h"))),
+            "validation_queued": queued, "archived": archived}
 
 
 @router.post("/api/youtube/strategies/{name}/enable")

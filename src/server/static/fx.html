@@ -1113,7 +1113,10 @@ function ytArchivedRow(s) {
       <summary>
         <b title="${name}">${name}</b>
         ${v.net_r != null ? `<span class="ytst bad" title="과거 검증: 비용을 뺀 거래당 기대값">${
-          rText(v.net_r)}</span>` : ""}
+          rText(v.net_r)}</span>`
+          : `<span class="ytst warn" title="${s.validation
+              ? "거래가 너무 적어 판정할 수 없었습니다" : "이 시간봉은 검증할 수 없습니다"}">${
+              s.validation ? "판정 불가" : "검증 불가"}</span>`}
         <span class="ytst">${(v.trades ?? 0).toLocaleString()}건</span>
       </summary>
       <div class="ytbody">
@@ -1281,8 +1284,9 @@ function renderYoutube(d) {
   const kept = d.archived || [];
   const job = d.validation_job || {};
   const moved = job.state === "done" && job.archived
-    ? `<div class="ytnote"><b>${esc(job.name)}</b> — 검증 결과 손실(${
-        job.net_r != null ? rText(job.net_r) : ""})이라 보관함으로 옮겼습니다.</div>` : "";
+    ? `<div class="ytnote"><b>${esc(job.name)}</b> — ${job.net_r != null
+        ? `검증 결과 손실(${rText(job.net_r)})이라`
+        : `거래가 너무 적어(${job.trades ?? 0}건) 판정할 수 없어`} 보관함으로 옮겼습니다.</div>` : "";
   // 보관함은 목록 위의 버튼으로 연다. 목록 맨 아래의 흐린 한 줄은 찾기 어려웠다.
   const shelfOpen = ytOpen.has("__archive");
   $("#ytshelf").innerHTML = kept.length ? `
@@ -1291,7 +1295,8 @@ function renderYoutube(d) {
         shelfOpen ? "닫기 ▲" : "열기 ▼"}</button></div>
     ${shelfOpen ? `<div style="border:1px solid var(--line);border-radius:7px;
         padding:4px 8px 8px;margin:4px 0 8px">
-      <div class="ytnote" style="margin-top:4px">수익 검증에 실패한 전략입니다. 투표에
+      <div class="ytnote" style="margin-top:4px">수익 검증을 통과하지 못한 전략입니다
+        (손실 · 판정 불가 · 검증 불가). 투표에
         들어가지 않습니다. 전략을 누르면 규칙과 검증 성적을 보고 영상을 재생할 수
         있습니다. 파일은 runs/youtube/archive 에 있습니다.</div>
       ${kept.map(ytArchivedRow).join("")}</div>` : ""}` : "";
@@ -1321,7 +1326,9 @@ async function ytExtract() {
     $("#ytmsg").innerHTML = `<div class="empty">저장했습니다 — <b>${esc(s.strategy_name)}</b>.
       ${s.validation_queued
         ? "과거 검증을 자동으로 시작했습니다. 통과하면 토글을 눌러 켤 수 있습니다."
-        : "꺼진 상태입니다. 이 전략은 자동으로 검증할 수 없습니다."}</div>`;
+        : s.archived
+          ? "이 시간봉은 검증할 수 없어 보관함으로 옮겼습니다."
+          : "꺼진 상태입니다. 이 전략은 자동으로 검증할 수 없습니다."}</div>`;
   } catch (e) {
     $("#ytmsg").innerHTML = `<div class="errbox">${esc(e.message)}</div>`;
   } finally {
