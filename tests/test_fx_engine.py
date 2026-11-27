@@ -451,3 +451,31 @@ def test_a_yen_pair_is_not_blocked_by_the_notional_cap(trader, monkeypatch):
     trader.start()
     drive(trader, Signal(close=159.0, stop=158.0, target=160.5), monkeypatch)
     assert len(trader.sent) == 1, trader.journal.tail(3, kinds=["blocked"])
+
+
+# ─── 감시 목록에서 뺀 종목 ───────────────────────────────────────
+
+def test_a_position_on_a_pair_taken_off_the_watchlist_is_still_looked_after(trader, monkeypatch):
+    """
+    감시 목록을 줄이는 순간 열려 있던 포지션이 버려지면 안 된다. 신호 청산이
+    멈추고, 역행 대응도 멈춘다. 닫을 때까지는 계속 훑는다.
+    """
+    trader.start()
+    drive(trader, Signal(), monkeypatch)
+    assert len(trader.sent) == 1
+    monkeypatch.setattr(trader, "watchlist", lambda: [])        # EUR/USD 를 목록에서 뺐다
+
+    drive(trader, Signal(action="청산", direction=0, stop=None), monkeypatch)
+    assert len(trader.closed_calls) == 1, "목록에서 빠졌어도 청산 신호는 들어야 한다"
+
+
+def test_no_new_entry_on_a_pair_that_is_off_the_watchlist(trader, monkeypatch):
+    """돌보는 것은 닫을 때까지다. 뒤집힌 신호로 닫은 뒤 반대로 새로 들어가지 않는다."""
+    trader.start()
+    drive(trader, Signal(), monkeypatch)
+    monkeypatch.setattr(trader, "watchlist", lambda: [])
+
+    drive(trader, Signal(action="숏진입", direction=-1, stop=1.1050, target=1.0900,
+                         bar_time="2025-06-01T13:00:00+00:00"), monkeypatch)
+    assert len(trader.closed_calls) == 1 and len(trader.sent) == 1, \
+        "반대 신호로 닫기만 하고 숏을 새로 열지 않는다"

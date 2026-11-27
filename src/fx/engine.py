@@ -50,7 +50,7 @@ from . import defense as fx_defense
 from . import keepawake
 from . import watchlist as fx_watchlist
 from .mt5 import MT5Error, bars, account, cash_flows, positions, symbol_info
-from .symbols import Pair
+from .symbols import Pair, parse
 
 # 검증 결과. 화면과 장부가 같은 문장을 쓰도록 한 곳에 둔다.
 VERDICT = {
@@ -559,8 +559,14 @@ class FxTrader:
             return self.status()
         pairs = self.watchlist()
         self.state.scanned = len(pairs)
+        # **감시 목록에서 뺀 종목이라도 들고 있으면 계속 돌본다.** 목록을 줄인 순간
+        # 열려 있던 포지션이 버려지면 신호 청산도 역행 대응도 멈춘다. 그런 종목은
+        # 닫을 때까지만 훑고, 새로 들어가지는 않는다.
+        watched = {p.mt5 for p in pairs}
+        leftover = [p for p in (parse(symbol) for symbol in sorted(
+            {pos["symbol"] for pos in self._known.values()} - watched)) if p is not None]
 
-        for pair in pairs:
+        for pair in pairs + leftover:
             try:
                 sig = self._signal(pair, strats, ep)
             except (MT5Error, ValueError) as exc:
@@ -578,7 +584,7 @@ class FxTrader:
                                    score=sig.score, bar_time=sig.bar_time)
                 self._follow(pair)
 
-            self._act(pair, sig, acct, ep)
+            self._act(pair, sig, acct, ep, allow_entry=pair.mt5 in watched)
 
         self.state.last_run = datetime.now(timezone.utc).isoformat()
         self.state.last_error = None
@@ -618,7 +624,8 @@ class FxTrader:
 
     # ─── 판단 → 주문 ─────────────────────────────────────────────
 
-    def _act(self, pair: Pair, sig: SymbolSignal, acct, ep: ExecParams) -> None:
+    def _act(self, pair: Pair, sig: SymbolSignal, acct, ep: ExecParams,
+             allow_entry: bool = True) -> None:
         held = [p for p in self._known.values() if p["symbol"] == pair.mt5]
         rules = self.defense()
         # 역행 대응 중이면 한 종목에 여러 포지션이(양방 대응은 반대 방향으로도)
@@ -647,8 +654,8 @@ class FxTrader:
             if basket is not None:
                 self._defend(pair, basket, sig, acct, ep)
             return
-        if sig.action not in ("롱진입", "숏진입"):
-            return
+        if not allow_entry or sig.action not in ("롱진입", "숏진입"):
+            return                    # 감시 목록 밖의 종목에는 새로 들어가지 않는다
 
         side = "LONG" if sig.direction > 0 else "SHORT"
         if sig.stop_price is None or sig.risk_per_unit is None:
